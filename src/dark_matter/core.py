@@ -209,3 +209,179 @@ def build_theoretical_dataframe(
         )
 
     return pd.DataFrame(results)
+
+
+def build_targeted_theoretical_dataframe(
+    metadata: dict[str, Any], target: str, arch: str = "arm64_tahoe"
+) -> pd.DataFrame:
+    """Constructs a DataFrame for a single target, minimizing network resolution."""
+    formulae = metadata.get("formulae", [])
+    casks = metadata.get("casks", [])
+    packages = formulae + casks
+
+    dependency_graph: dict[str, list[str]] = {}
+    pkg_data_map = {}
+
+    # 1. Build the global topology
+    for pkg in packages:
+        name = pkg["name"]
+        if isinstance(name, list):
+            name = name[0]
+        dependency_graph[name] = pkg.get("dependencies", [])
+        pkg_data_map[name] = pkg
+
+    if target not in dependency_graph:
+        raise ValueError(f"Package '{target}' not found in the catalog.")
+
+    # 2. Compute global in-degrees for accurate fractional attribution (Fast)
+    package_transitive_deps = {
+        pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
+    }
+
+    dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
+    for deps in package_transitive_deps.values():
+        for dep in deps:
+            dependency_parent_count[dep] += 1
+
+    # 3. Isolate the target's closure
+    target_deps = package_transitive_deps[target]
+    resolution_set = {target} | target_deps
+
+    # 4. Resolve bottle sizes ONLY for the target's closure (Slow/Network bounded)
+    package_digest: dict[str, str] = {}
+    bottles: dict[str, str] = {}
+
+    for name in resolution_set:
+        pkg = pkg_data_map[name]
+        files = pkg.get("bottle", {}).get("stable", {}).get("files", {})
+        file_info = files.get(arch) or next(iter(files.values()), None)
+
+        if file_info is not None:
+            digest = file_info.get("sha256", "")
+            url = file_info.get("url", "")
+            if digest and url:
+                package_digest[name] = digest
+                bottles[digest] = url
+
+    cache = homebrew.load_bottle_size_cache()
+    resolved_sizes = homebrew.resolve_bottle_sizes(bottles, cache)
+    homebrew.save_bottle_size_cache(cache)
+
+    size_map: dict[str, int] = {
+        name: resolved_sizes.get(digest, 0) for name, digest in package_digest.items()
+    }
+
+    # 5. Apply the mathematical models
+    core_size = size_map.get(target, 0)
+    standard_recursive_size = core_size + sum(size_map.get(d, 0) for d in target_deps)
+
+    fractional_dep_size = sum(
+        size_map.get(d, 0) / dependency_parent_count.get(d, 1) for d in target_deps
+    )
+    weighted_recursive_size = core_size + fractional_dep_size
+    ratio = (weighted_recursive_size / core_size) if core_size > 0 else 1.0
+
+    return pd.DataFrame(
+        [
+            {
+                "Package": target,
+                "Core_Bytes": core_size,
+                "Standard_Bytes": standard_recursive_size,
+                "Weighted_Bytes": weighted_recursive_size,
+                "Bloat_Ratio": ratio,
+                "Dep_Count": len(target_deps),
+                "Is_Leaf": True,  # Forced true so display.py renders it
+            }
+        ]
+    )
+
+
+def build_compare_theoretical_dataframe(
+    metadata: dict[str, Any], targets: list[str], arch: str = "arm64_tahoe"
+) -> pd.DataFrame:
+    """Constructs a DataFrame for multiple targets, resolving their unioned closure."""
+    formulae = metadata.get("formulae", [])
+    casks = metadata.get("casks", [])
+    packages = formulae + casks
+
+    dependency_graph: dict[str, list[str]] = {}
+    pkg_data_map = {}
+
+    for pkg in packages:
+        name = pkg["name"]
+        if isinstance(name, list):
+            name = name[0]
+        dependency_graph[name] = pkg.get("dependencies", [])
+        pkg_data_map[name] = pkg
+
+    # Filter out typos or missing packages
+    valid_targets = [t for t in targets if t in dependency_graph]
+    if not valid_targets:
+        raise ValueError("None of the specified packages were found in the catalog.")
+
+    # Compute global topology
+    package_transitive_deps = {
+        pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
+    }
+
+    dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
+    for deps in package_transitive_deps.values():
+        for dep in deps:
+            dependency_parent_count[dep] += 1
+
+    # Isolate the union of all targets' closures for batch network resolution
+    resolution_set = set(valid_targets)
+    for t in valid_targets:
+        resolution_set.update(package_transitive_deps[t])
+
+    package_digest: dict[str, str] = {}
+    bottles: dict[str, str] = {}
+
+    for name in resolution_set:
+        pkg = pkg_data_map[name]
+        files = pkg.get("bottle", {}).get("stable", {}).get("files", {})
+        file_info = files.get(arch) or next(iter(files.values()), None)
+
+        if file_info is not None:
+            digest = file_info.get("sha256", "")
+            url = file_info.get("url", "")
+            if digest and url:
+                package_digest[name] = digest
+                bottles[digest] = url
+
+    cache = homebrew.load_bottle_size_cache()
+    resolved_sizes = homebrew.resolve_bottle_sizes(bottles, cache)
+    homebrew.save_bottle_size_cache(cache)
+
+    size_map: dict[str, int] = {
+        name: resolved_sizes.get(digest, 0) for name, digest in package_digest.items()
+    }
+
+    # Apply mathematical models per target
+    results = []
+    for target in valid_targets:
+        target_deps = package_transitive_deps[target]
+        core_size = size_map.get(target, 0)
+        standard_recursive_size = core_size + sum(
+            size_map.get(d, 0) for d in target_deps
+        )
+
+        fractional_dep_size = sum(
+            size_map.get(d, 0) / dependency_parent_count.get(d, 1) for d in target_deps
+        )
+        weighted_recursive_size = core_size + fractional_dep_size
+        ratio = (weighted_recursive_size / core_size) if core_size > 0 else 1.0
+
+        results.append(
+            {
+                "Package": target,
+                "Core_Bytes": core_size,
+                "Standard_Bytes": standard_recursive_size,
+                "Weighted_Bytes": weighted_recursive_size,
+                "Bloat_Ratio": ratio,
+                "Dep_Count": len(target_deps),
+                "Is_Leaf": True,
+            }
+        )
+
+    return pd.DataFrame(results)

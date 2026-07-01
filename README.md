@@ -26,22 +26,24 @@ The ratio between the two — the **Bloat Ratio** — is the headline number. A 
 
 ## Features
 
-- **Two analysis modes**
+- **Comprehensive analysis suite**
   - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts.
-  - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula and cask catalog from the local API cache, without requiring anything to be installed. Bottle sizes are resolved by issuing concurrent, cached `HEAD` requests against `ghcr.io`'s OCI blob storage, so nothing is downloaded.
+  - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula and cask catalog from the local API cache, without requiring anything to be installed.
+  - `inspect` & `compare` — targeted O(1) theoretical resolution for individual or grouped packages without resolving the entire ecosystem payload.
+  - `export` — streams the underlying DataFrames to CSV or JSON for integration into external data pipelines.
 - **Fractional Attribution Model** — shared dependencies (`openssl`, `python`, etc.) are divided proportionally across all parent packages instead of being double-counted, giving an honest per-package cost.
 - **Daemon-free** — no background indexing, no persistent database. Every run is a fresh, on-demand computation.
 - **Typed and tested** — fully type-annotated (strict `mypy`), linted with `ruff`, and covered by a `pytest` suite exercising the DAG traversal, fractional math, and network resolution logic. CI runs the full suite on macOS and Ubuntu across Python 3.12 and 3.14.
 
 ## A note on theoretical measurements
 
-`leaderboard` relies on `Content-Length` headers from `ghcr.io` blob storage, which report *compressed* archive size, not the size a package occupies once unpacked to disk. The absolute numbers it reports will therefore run lower than `analyze`'s physical measurements.
+`leaderboard`, `inspect`, and `compare` rely on `Content-Length` headers from `ghcr.io` blob storage, which report *compressed* archive size, not the size a package occupies once unpacked to disk. The absolute numbers they report will therefore run lower than `analyze`'s physical measurements.
 
 The Bloat Ratio, however, stays meaningful. Since most bottles compress with similar algorithms (gzip or zstd), the compression factor $c$ appears in both the numerator and denominator and cancels out:
 
 $$R \approx \frac{c \cdot m_{recursive}}{c \cdot m_{core}} \approx \frac{m_{recursive}}{m_{core}}$$
 
-So while `leaderboard` shouldn't be read as a precise disk-space forecast, it's a reliable way to rank the entire ecosystem by relative bloat without installing anything.
+So while theoretical modes shouldn't be read as precise disk-space forecasts, they are a reliable way to evaluate relative bloat without installing anything.
 
 ## Installation
 
@@ -59,7 +61,18 @@ dark-matter analyze
 
 # Rank the entire Homebrew catalog by theoretical bloat
 dark-matter leaderboard
+
+# Evaluate a specific formula instantly
+dark-matter inspect uv
+
+# Compare multiple packages side-by-side
+dark-matter compare uv poetry pdm
+
+# Export the entire graph to JSON for external analysis
+dark-matter export --format json > homebrew_bloat.json
 ```
+
+All commands accept the global `--verbose` / `-v` flag for debug logging, and `--version` to print the installed version.
 
 ### `analyze`
 
@@ -69,12 +82,6 @@ dark-matter leaderboard
 | `--top` / `-n` | `20` | Number of packages to display |
 | `--fractional` / `--standard` | `--fractional` | Toggle the Fractional Attribution Model |
 
-**Example:**
-
-```bash
-dark-matter analyze --sort recursive --top 15
-```
-
 ### `leaderboard`
 
 | Flag | Default | Description |
@@ -83,7 +90,28 @@ dark-matter analyze --sort recursive --top 15
 | `--top` / `-n` | `20` | Number of packages to display |
 | `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
 
-Both commands accept the global `--verbose` / `-v` flag for debug logging, and `--version` to print the installed version.
+### `inspect`
+
+| Argument/Flag | Default | Description |
+| --- | --- | --- |
+| `[PACKAGE]` | **Required** | The target package to analyze |
+| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
+
+### `compare`
+
+| Argument/Flag | Default | Description |
+| --- | --- | --- |
+| `[PACKAGES]...` | **Required** | A space-separated list of packages to compare |
+| `--sort` / `-s` | `ratio` | Sort by `ratio`, `core`, or `recursive` |
+| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
+
+### `export`
+
+| Flag | Default | Description |
+| --- | --- | --- |
+| `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
+| `--format` / `-f` | `csv` | Output format: `csv` or `json` |
+| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture (for `catalog` source) |
 
 ## Development
 
