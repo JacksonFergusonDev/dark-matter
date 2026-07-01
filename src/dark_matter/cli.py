@@ -1,3 +1,6 @@
+import sys
+from enum import StrEnum
+
 import typer
 from rich.console import Console
 
@@ -181,6 +184,76 @@ def compare(
 
     except RuntimeError as e:
         console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+
+
+class ExportFormat(StrEnum):
+    """Supported serialized output formats for the export command."""
+
+    csv = "csv"
+    json = "json"
+
+
+class ExportSource(StrEnum):
+    """Supported theoretical or physical data sources for the export command."""
+
+    installed = "installed"
+    catalog = "catalog"
+
+
+@app.command()
+def export(
+    source: ExportSource = typer.Option(
+        ExportSource.installed,
+        "--source",
+        "-s",
+        help="Data source: 'installed' or 'catalog'.",
+    ),
+    format: ExportFormat = typer.Option(
+        ExportFormat.csv, "--format", "-f", help="Output format: 'csv' or 'json'."
+    ),
+    arch: str = typer.Option(
+        "arm64_tahoe",
+        "--arch",
+        "-a",
+        help="Target architecture profile (catalog only).",
+    ),
+) -> None:
+    """Export the computed bloat analysis dataframe for external pipelines."""
+    # Isolate UI rendering to stderr to protect the stdout data stream
+    err_console = Console(stderr=True)
+
+    try:
+        prefix = homebrew.get_brew_prefix()
+
+        if source == ExportSource.installed:
+            with err_console.status(
+                "[yellow]Ingesting JSON metadata via brew API...[/yellow]"
+            ):
+                metadata = homebrew.get_brew_metadata()
+            with err_console.status(
+                "[yellow]Computing fractional attribution DAG...[/yellow]"
+            ):
+                df = core.build_analysis_dataframe(metadata, prefix)
+        else:
+            with err_console.status(
+                "[yellow]Accessing local ecosystem cache...[/yellow]"
+            ):
+                metadata = homebrew.get_theoretical_catalog(prefix)
+            with err_console.status(
+                "[yellow]Processing massive theoretical DAG...[/yellow]"
+            ):
+                df = core.build_theoretical_dataframe(metadata, arch=arch)
+
+        # Flush the pure dataset to stdout
+        if format == ExportFormat.csv:
+            sys.stdout.write(df.to_csv(index=False))
+        else:
+            sys.stdout.write(df.to_json(orient="records", indent=2))
+            sys.stdout.write("\n")
+
+    except RuntimeError as e:
+        err_console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
         raise typer.Exit(code=1) from e
 
 
