@@ -142,5 +142,47 @@ def inspect(
         raise typer.Exit(code=1) from e
 
 
+@app.command()
+def compare(
+    packages: list[str] = typer.Argument(..., help="The specific packages to compare."),
+    sort_by: str = typer.Option(
+        "ratio", "--sort", "-s", help="Sorting metric: 'ratio', 'core', or 'recursive'."
+    ),
+    arch: str = typer.Option(
+        "arm64_tahoe", "--arch", "-a", help="Target architecture profile."
+    ),
+) -> None:
+    """Evaluate and compare the theoretical bloat of multiple packages."""
+    pkg_list_str = ", ".join(packages)
+    console.print(
+        f"[bold cyan]Comparing theoretical bloat for: {pkg_list_str}[/bold cyan]"
+    )
+
+    try:
+        prefix = homebrew.get_brew_prefix()
+        metadata = homebrew.get_theoretical_catalog(prefix)
+
+        with console.status("[yellow]Computing fractional DAG union...[/yellow]"):
+            try:
+                df = core.build_compare_theoretical_dataframe(
+                    metadata, targets=packages, arch=arch
+                )
+            except ValueError as e:
+                console.print(f"[bold red]Error:[/bold red] {e}")
+                raise typer.Exit(code=1) from e
+
+        display.render_bloat_table(
+            df,
+            sort_by=sort_by,
+            top_n=len(packages),
+            fractional=True,
+            is_theoretical=True,
+        )
+
+    except RuntimeError as e:
+        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+
+
 if __name__ == "__main__":
     app()
