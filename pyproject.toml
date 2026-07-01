@@ -1,0 +1,144 @@
+[project]
+name = "dark-matter"
+version = "0.1.0"
+readme = "README.md"
+authors = [{ name = "Jackson Ferguson", email = "jackson.ferguson0@gmail.com" }]
+requires-python = ">=3.12"
+dependencies = [
+    "pandas>=3.0.3",
+    "requests>=2.34.0",
+    "rich>=15.0.0",
+    "typer>=0.25.1",
+]
+license = { file = "LICENSE" }
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Operating System :: MacOS",
+    "Operating System :: POSIX :: Linux",
+]
+
+[project.urls]
+Repository = "https://github.com/jacksonfergusondev/dark-matter"
+Issues = "https://github.com/jacksonfergusondev/dark-matter/issues"
+
+[project.scripts]
+dark-matter = "dark_matter.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[dependency-groups]
+ci = [
+    "mypy>=1.19.1",
+    "pandas-stubs>=3.0.3.260530",
+    "pytest>=9.0.2",
+    "pytest-cov>=7.0.0",
+    "pytest-mock>=3.15.1",
+    "ruff>=0.14.13",
+]
+dev = [{ include-group = "ci" }, "bump-my-version>=1.2.6", "pre-commit>=4.5.1"]
+
+# ==================================================
+# Tool Configuration
+# ==================================================
+
+# ---- ruff ---- #
+
+[tool.ruff]
+target-version = "py312"
+extend-exclude = ["docs", "site"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "B",
+    "UP",
+    "SIM",
+    "T20",
+    "PT",
+    "C4",
+    "D",
+    "RUF",
+    "N",
+    "RET",
+]
+ignore = ["E501", "D100", "D104", "D107"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.lint.isort]
+known-first-party = ["dark_matter"]
+section-order = [
+    "future",
+    "standard-library",
+    "third-party",
+    "first-party",
+    "local-folder",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*.py" = ["T201", "D"]
+
+# ---- mypy ---- #
+
+[tool.mypy]
+python_version = "3.12"
+pretty = true
+show_error_codes = true
+show_error_context = true
+warn_return_any = true
+warn_unused_configs = true
+check_untyped_defs = true
+disallow_untyped_defs = true
+exclude = ["^docs/", "^site/"]
+
+[[tool.mypy.overrides]]
+files = ["tests.*"]
+disallow_untyped_defs = false
+
+# ---- pytest ---- #
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.coverage.run]
+source = ["src/dark_matter"]
+branch = true
+
+[tool.coverage.report]
+omit = ["src/dark_matter/**/__init__.py"]
+show_missing = true
+skip_covered = true
+
+# ---- bump-my-version ---- #
+
+[tool.bumpversion]
+current_version = "0.1.0"
+parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+serialize = ["{major}.{minor}.{patch}"]
+search = "{current_version}"
+replace = "{new_version}"
+regex = false
+ignore_missing_version = false
+tag = false
+sign_tags = false
+tag_name = "v{new_version}"
+tag_message = "Bump version: {current_version} → {new_version}"
+allow_dirty = false
+commit = true
+message = "chore: bump version {current_version} → {new_version}"
+commit_args = ""
+
+[[tool.bumpversion.files]]
+filename = "pyproject.toml"
+search = 'version = "{current_version}"'
+replace = 'version = "{new_version}"'

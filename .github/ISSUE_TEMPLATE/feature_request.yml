@@ -1,0 +1,29 @@
+name: 🚀 Feature Request
+description: Propose a new metric, attribution model, or pipeline enhancement.
+title: "[FEAT]: <brief description>"
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Have an idea to improve the resolution of the cosmological storage mapping? Detail the theoretical model or structural enhancement below.
+  - type: textarea
+    id: problem
+    attributes:
+      label: The Problem
+      description: Is this request addressing a specific limitation or graph-ignorance in the current pipeline?
+      placeholder: The current fractional model does not account for...
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed Solution
+      description: Detail the programmatic implementation or mathematical algorithm you'd like to see added.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+      description: Are there other algorithms, heuristics, or external tooling that could achieve a similar result?

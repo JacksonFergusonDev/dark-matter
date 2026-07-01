@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Theoretical or Mathematical Inquiries
+    url: https://github.com/jacksonfergusondev/dark-matter/issues
+    about: Unsure how the Fractional Attribution Model distributes package mass? Open a general issue.

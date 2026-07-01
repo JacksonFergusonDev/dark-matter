@@ -1,0 +1,59 @@
+name: 🐛 Bug Report
+description: Report anomalous pipeline behavior or incorrect bloat mass calculations.
+title: "[BUG]: <brief description>"
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping map the unseen mass. Please provide as much telemetry as possible so we can accurately reproduce the anomaly in the local DAG.
+  - type: textarea
+    id: description
+    attributes:
+      label: Anomaly Description
+      description: A clear and concise description of the pipeline failure or mathematical error.
+      placeholder: When computing the transitive in-degree map, dark-matter encounters a KeyError...
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction Vector
+      description: The exact CLI invocation or state required to reproduce the behavior.
+      placeholder: |
+        1. Have package `X` installed via Homebrew
+        2. Execute `dark-matter --sort recursive --standard`
+        3. Observe pipeline termination
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you mathematically or programmatically expect the pipeline to output?
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Traceback / Output Logs
+      description: Paste any relevant stderr tracebacks or verbose CLI output.
+      render: python
+  - type: input
+    id: version
+    attributes:
+      label: Dark Matter Version
+      description: Output of `dark-matter --version`
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System / Architecture
+      options:
+        - macOS (Apple Silicon / ARM64)
+        - macOS (Intel / x86_64)
+        - Linux (POSIX)
+    validations:
+      required: true
