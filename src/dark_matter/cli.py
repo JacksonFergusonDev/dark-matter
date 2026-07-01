@@ -106,5 +106,41 @@ def leaderboard(
         raise typer.Exit(code=1) from e
 
 
+@app.command()
+def inspect(
+    package: str = typer.Argument(..., help="The specific package to analyze."),
+    arch: str = typer.Option(
+        "arm64_tahoe", "--arch", "-a", help="Target architecture profile."
+    ),
+) -> None:
+    """Evaluate the theoretical bloat of a single target package."""
+    console.print(
+        f"[bold cyan]Inspecting theoretical bloat for '{package}'...[/bold cyan]"
+    )
+
+    try:
+        prefix = homebrew.get_brew_prefix()
+        metadata = homebrew.get_theoretical_catalog(prefix)
+
+        with console.status(
+            f"[yellow]Computing fractional DAG for {package}...[/yellow]"
+        ):
+            try:
+                df = core.build_targeted_theoretical_dataframe(
+                    metadata, target=package, arch=arch
+                )
+            except ValueError as e:
+                console.print(f"[bold red]Error:[/bold red] {e}")
+                raise typer.Exit(code=1) from e
+
+        display.render_bloat_table(
+            df, sort_by="ratio", top_n=1, fractional=True, is_theoretical=True
+        )
+
+    except RuntimeError as e:
+        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+
+
 if __name__ == "__main__":
     app()
