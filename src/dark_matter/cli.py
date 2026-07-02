@@ -1,5 +1,8 @@
+import contextlib
 import sys
 from enum import StrEnum
+from pathlib import Path
+from typing import Any
 
 import typer
 from rich.console import Console
@@ -29,6 +32,35 @@ class ExportSource(StrEnum):
     catalog = "catalog"
 
 
+@contextlib.contextmanager
+def handle_pipeline_errors(active_console: Console = console):
+    """Centralize exception catching and CLI exit codes."""
+    try:
+        yield
+    except (RuntimeError, ValueError) as e:
+        active_console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+
+
+def load_ecosystem_context(
+    source: ExportSource, active_console: Console, target_msg: str | None = None
+) -> tuple[Path, dict[str, Any], bool]:
+    """Resolve the prefix and ingest the metadata payload while managing UI state."""
+    prefix = homebrew.get_brew_prefix()
+    is_theoretical = source == ExportSource.catalog
+
+    if not is_theoretical:
+        msg = target_msg or "[yellow]Scanning physical disk footprint...[/yellow]"
+        with active_console.status(msg):
+            metadata = homebrew.get_brew_metadata()
+    else:
+        msg = target_msg or "[yellow]Computing theoretical ecosystem DAG...[/yellow]"
+        with active_console.status(msg):
+            metadata = homebrew.get_theoretical_catalog(prefix)
+
+    return prefix, metadata, is_theoretical
+
+
 def version_callback(value: bool) -> None:
     """Print the version and exit eagerly."""
     if value:
@@ -55,34 +87,22 @@ def main(
 
 @app.command()
 def analyze(
-    sort_by: str = typer.Option(
-        "ratio", "--sort", "-s", help="Sorting metric: 'ratio', 'core', or 'recursive'."
-    ),
+    sort_by: str = typer.Option("ratio", "--sort", "-s", help="Sorting metric."),
     top_n: int = typer.Option(20, "--top", "-n", help="Number of packages to display."),
-    fractional: bool = typer.Option(
-        True,
-        "--fractional/--standard",
-        help="Utilize the fractional attribution model for shared dependencies.",
-    ),
+    fractional: bool = typer.Option(True, "--fractional/--standard"),
 ) -> None:
     """Execute the storage bloat analysis pipeline."""
     console.print("[bold cyan]Initializing Dark Matter pipeline...[/bold cyan]")
 
-    try:
-        prefix = homebrew.get_brew_prefix()
-        console.print(f"Resolved Homebrew prefix: [green]{prefix}[/green]")
+    with handle_pipeline_errors():
+        prefix, metadata, _ = load_ecosystem_context(ExportSource.installed, console)
 
-        with console.status("[yellow]Ingesting JSON metadata via brew API...[/yellow]"):
-            metadata = homebrew.get_brew_metadata()
-            formulae_count = len(metadata.get("formulae", []))
-            casks_count = len(metadata.get("casks", []))
-
+        formulae_count = len(metadata.get("formulae", []))
+        casks_count = len(metadata.get("casks", []))
         console.print(
-            f"Successfully parsed [bold]{formulae_count}[/bold] formulae and "
-            f"[bold]{casks_count}[/bold] casks."
+            f"Successfully parsed [bold]{formulae_count}[/bold] formulae and [bold]{casks_count}[/bold] casks."
         )
 
-        # 2. Replaced the pending message with the actual execution calls
         with console.status("[yellow]Computing fractional attribution DAG...[/yellow]"):
             df = core.build_analysis_dataframe(metadata, prefix)
 
@@ -90,27 +110,20 @@ def analyze(
             df, sort_by=sort_by, top_n=top_n, fractional=fractional
         )
 
-    except RuntimeError as e:
-        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
-        raise typer.Exit(code=1) from e
-
 
 @app.command()
 def leaderboard(
-    sort_by: str = typer.Option(
-        "ratio", "--sort", "-s", help="Sorting metric: 'ratio', 'core', or 'recursive'."
-    ),
+    sort_by: str = typer.Option("ratio", "--sort", "-s", help="Sorting metric."),
     top_n: int = typer.Option(20, "--top", "-n", help="Number of packages to display."),
     arch: str = typer.Option(
-        "arm64_tahoe", "--arch", "-a", help="Target architecture profile."
+        "arm64_tahoe", "--arch", "-a", help="Target architecture."
     ),
 ) -> None:
-    """Evaluate the complete theoretical ecosystem leaderboard from local API caches."""
+    """Evaluate the complete theoretical ecosystem leaderboard."""
     console.print("[bold cyan]Accessing local ecosystem cache...[/bold cyan]")
 
-    try:
-        prefix = homebrew.get_brew_prefix()
-        metadata = homebrew.get_theoretical_catalog(prefix)
+    with handle_pipeline_errors():
+        _, metadata, _ = load_ecosystem_context(ExportSource.catalog, console)
 
         with console.status("[yellow]Processing massive theoretical DAG...[/yellow]"):
             df = core.build_theoretical_dataframe(metadata, arch=arch)
@@ -118,119 +131,62 @@ def leaderboard(
         display.render_bloat_table(
             df, sort_by=sort_by, top_n=top_n, fractional=True, is_theoretical=True
         )
-    except RuntimeError as e:
-        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
-        raise typer.Exit(code=1) from e
 
 
 @app.command()
 def inspect(
     package: str = typer.Argument(..., help="The specific package to analyze."),
-    source: ExportSource = typer.Option(
-        ExportSource.installed,
-        "--source",
-        "-s",
-        help="Data source: 'installed' (physical) or 'catalog' (theoretical).",
-    ),
-    arch: str = typer.Option(
-        "arm64_tahoe",
-        "--arch",
-        "-a",
-        help="Target architecture profile (catalog only).",
-    ),
+    source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
+    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
 ) -> None:
     """Evaluate the bloat of a single target package."""
     console.print(f"[bold cyan]Inspecting bloat for '{package}'...[/bold cyan]")
 
-    try:
-        prefix = homebrew.get_brew_prefix()
+    with handle_pipeline_errors():
+        prefix, metadata, is_theoretical = load_ecosystem_context(
+            source,
+            console,
+            target_msg=f"[yellow]Resolving data for {package}...[/yellow]",
+        )
 
-        if source == ExportSource.installed:
-            with console.status(
-                f"[yellow]Scanning physical disk footprint for {package}...[/yellow]"
-            ):
-                metadata = homebrew.get_brew_metadata()
-                try:
-                    df = core.build_targeted_analysis_dataframe(
-                        metadata, prefix, target=package
-                    )
-                except ValueError as e:
-                    console.print(f"[bold red]Error:[/bold red] {e}")
-                    raise typer.Exit(code=1) from e
-                is_theoretical = False
+        if is_theoretical:
+            df = core.build_targeted_theoretical_dataframe(
+                metadata, target=package, arch=arch
+            )
         else:
-            with console.status(
-                f"[yellow]Computing theoretical DAG for {package}...[/yellow]"
-            ):
-                metadata = homebrew.get_theoretical_catalog(prefix)
-                try:
-                    df = core.build_targeted_theoretical_dataframe(
-                        metadata, target=package, arch=arch
-                    )
-                except ValueError as e:
-                    console.print(f"[bold red]Error:[/bold red] {e}")
-                    raise typer.Exit(code=1) from e
-                is_theoretical = True
+            df = core.build_targeted_analysis_dataframe(
+                metadata, prefix, target=package
+            )
 
         display.render_bloat_table(
             df, sort_by="ratio", top_n=1, fractional=True, is_theoretical=is_theoretical
         )
 
-    except RuntimeError as e:
-        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
-        raise typer.Exit(code=1) from e
-
 
 @app.command()
 def compare(
     packages: list[str] = typer.Argument(..., help="The specific packages to compare."),
-    sort_by: str = typer.Option(
-        "ratio", "--sort", "-s", help="Sorting metric: 'ratio', 'core', or 'recursive'."
-    ),
-    source: ExportSource = typer.Option(
-        ExportSource.installed,
-        "--source",
-        "-s",
-        help="Data source: 'installed' (physical) or 'catalog' (theoretical).",
-    ),
-    arch: str = typer.Option(
-        "arm64_tahoe",
-        "--arch",
-        "-a",
-        help="Target architecture profile (catalog only).",
-    ),
+    sort_by: str = typer.Option("ratio", "--sort", "-s"),
+    source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
+    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
 ) -> None:
     """Evaluate and compare the bloat of multiple packages."""
     pkg_list_str = ", ".join(packages)
     console.print(f"[bold cyan]Comparing bloat for: {pkg_list_str}[/bold cyan]")
 
-    try:
-        prefix = homebrew.get_brew_prefix()
+    with handle_pipeline_errors():
+        prefix, metadata, is_theoretical = load_ecosystem_context(
+            source, console, target_msg="[yellow]Resolving data for targets...[/yellow]"
+        )
 
-        if source == ExportSource.installed:
-            with console.status(
-                "[yellow]Scanning physical disk footprint for targets...[/yellow]"
-            ):
-                metadata = homebrew.get_brew_metadata()
-                try:
-                    df = core.build_compare_analysis_dataframe(
-                        metadata, prefix, targets=packages
-                    )
-                except ValueError as e:
-                    console.print(f"[bold red]Error:[/bold red] {e}")
-                    raise typer.Exit(code=1) from e
-                is_theoretical = False
+        if is_theoretical:
+            df = core.build_compare_theoretical_dataframe(
+                metadata, targets=packages, arch=arch
+            )
         else:
-            with console.status("[yellow]Computing fractional DAG union...[/yellow]"):
-                metadata = homebrew.get_theoretical_catalog(prefix)
-                try:
-                    df = core.build_compare_theoretical_dataframe(
-                        metadata, targets=packages, arch=arch
-                    )
-                except ValueError as e:
-                    console.print(f"[bold red]Error:[/bold red] {e}")
-                    raise typer.Exit(code=1) from e
-                is_theoretical = True
+            df = core.build_compare_analysis_dataframe(
+                metadata, prefix, targets=packages
+            )
 
         display.render_bloat_table(
             df,
@@ -240,117 +196,60 @@ def compare(
             is_theoretical=is_theoretical,
         )
 
-    except RuntimeError as e:
-        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
-        raise typer.Exit(code=1) from e
-
 
 @app.command()
 def export(
-    source: ExportSource = typer.Option(
-        ExportSource.installed,
-        "--source",
-        "-s",
-        help="Data source: 'installed' or 'catalog'.",
-    ),
-    format: ExportFormat = typer.Option(
-        ExportFormat.csv, "--format", "-f", help="Output format: 'csv' or 'json'."
-    ),
-    arch: str = typer.Option(
-        "arm64_tahoe",
-        "--arch",
-        "-a",
-        help="Target architecture profile (catalog only).",
-    ),
+    source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
+    format: ExportFormat = typer.Option(ExportFormat.csv, "--format", "-f"),
+    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
 ) -> None:
     """Export the computed bloat analysis dataframe for external pipelines."""
-    # Isolate UI rendering to stderr to protect the stdout data stream
     err_console = Console(stderr=True)
 
-    try:
-        prefix = homebrew.get_brew_prefix()
+    with handle_pipeline_errors(err_console):
+        prefix, metadata, is_theoretical = load_ecosystem_context(source, err_console)
 
-        if source == ExportSource.installed:
-            with err_console.status(
-                "[yellow]Ingesting JSON metadata via brew API...[/yellow]"
-            ):
-                metadata = homebrew.get_brew_metadata()
-            with err_console.status(
-                "[yellow]Computing fractional attribution DAG...[/yellow]"
-            ):
-                df = core.build_analysis_dataframe(metadata, prefix)
-        else:
-            with err_console.status(
-                "[yellow]Accessing local ecosystem cache...[/yellow]"
-            ):
-                metadata = homebrew.get_theoretical_catalog(prefix)
-            with err_console.status(
-                "[yellow]Processing massive theoretical DAG...[/yellow]"
-            ):
+        with err_console.status(
+            "[yellow]Computing fractional attribution DAG...[/yellow]"
+        ):
+            if is_theoretical:
                 df = core.build_theoretical_dataframe(metadata, arch=arch)
+            else:
+                df = core.build_analysis_dataframe(metadata, prefix)
 
-        # Flush the pure dataset to stdout
         if format == ExportFormat.csv:
             sys.stdout.write(df.to_csv(index=False))
         else:
             sys.stdout.write(df.to_json(orient="records", indent=2))
             sys.stdout.write("\n")
 
-    except RuntimeError as e:
-        err_console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
-        raise typer.Exit(code=1) from e
-
 
 @app.command()
 def explain(
-    package: str = typer.Argument(
-        ..., help="The specific package to analyze dependencies for."
-    ),
-    source: ExportSource = typer.Option(
-        ExportSource.installed,
-        "--source",
-        "-s",
-        help="Data source: 'installed' (physical) or 'catalog' (theoretical).",
-    ),
-    arch: str = typer.Option(
-        "arm64_tahoe",
-        "--arch",
-        "-a",
-        help="Target architecture profile (catalog only).",
-    ),
+    package: str = typer.Argument(..., help="The specific package to analyze."),
+    source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
+    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
 ) -> None:
     """Break down the bloat of a package by its dependencies."""
     console.print(
         f"[bold cyan]Explaining fractional dependencies for '{package}'...[/bold cyan]"
     )
 
-    try:
-        prefix = homebrew.get_brew_prefix()
+    with handle_pipeline_errors():
+        prefix, metadata, is_theoretical = load_ecosystem_context(
+            source,
+            console,
+            target_msg=f"[yellow]Resolving data for {package}...[/yellow]",
+        )
 
-        if source == ExportSource.installed:
-            with console.status(
-                f"[yellow]Scanning physical disk footprint for {package}...[/yellow]"
-            ):
-                metadata = homebrew.get_brew_metadata()
-                df = core.build_explain_analysis_dataframe(
-                    metadata, prefix, target=package
-                )
-                is_theoretical = False
+        if is_theoretical:
+            df = core.build_explain_theoretical_dataframe(
+                metadata, target=package, arch=arch
+            )
         else:
-            with console.status(
-                f"[yellow]Computing theoretical closure for {package}...[/yellow]"
-            ):
-                metadata = homebrew.get_theoretical_catalog(prefix)
-                df = core.build_explain_theoretical_dataframe(
-                    metadata, target=package, arch=arch
-                )
-                is_theoretical = True
+            df = core.build_explain_analysis_dataframe(metadata, prefix, target=package)
 
         display.render_explain_table(df, target=package, is_theoretical=is_theoretical)
-
-    except (RuntimeError, ValueError) as e:
-        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
-        raise typer.Exit(code=1) from e
 
 
 if __name__ == "__main__":
