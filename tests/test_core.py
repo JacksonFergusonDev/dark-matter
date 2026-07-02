@@ -27,7 +27,7 @@ def test_build_analysis_dataframe(mocker, mock_brew_metadata, mock_brew_sizes):
     # Mock os.scandir wrapper to return predefined sizes
     def mock_get_directory_size(path: Path) -> int:
         pkg_name = path.name
-        return mock_brew_sizes.get(pkg_name, 0)
+        return int(mock_brew_sizes.get(pkg_name, 0))
 
     mocker.patch(
         "dark_matter.homebrew.get_directory_size", side_effect=mock_get_directory_size

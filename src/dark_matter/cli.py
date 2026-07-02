@@ -1,5 +1,6 @@
 import contextlib
 import sys
+from collections.abc import Iterator
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -47,7 +48,7 @@ class ExportSource(StrEnum):
 
 
 @contextlib.contextmanager
-def handle_pipeline_errors(active_console: Console = console):
+def handle_pipeline_errors(active_console: Console = console) -> Iterator[None]:
     """Centralize exception catching and CLI exit codes."""
     try:
         yield
