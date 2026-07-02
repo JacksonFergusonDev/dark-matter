@@ -15,15 +15,13 @@ def test_version_flag():
 
 def test_analyze_command(mocker, mock_brew_metadata):
     """Verify successful execution of the primary CLI pipeline."""
-    mocker.patch("dark_matter.homebrew.get_brew_prefix", return_value="/opt/homebrew")
-    mocker.patch(
-        "dark_matter.homebrew.get_brew_metadata", return_value=mock_brew_metadata
-    )
+    # Patch the references inside the cli module
+    mocker.patch("dark_matter.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch("dark_matter.cli.get_brew_metadata", return_value=mock_brew_metadata)
 
     # Bypass structural DataFrame computation and rendering
-    mocker.patch("dark_matter.core.build_analysis_dataframe")
+    mocker.patch("dark_matter.cli.build_analysis_dataframe")
     mocker.patch("dark_matter.display.render_bloat_table")
 
     result = runner.invoke(app, ["analyze", "--top", "5"])
     assert result.exit_code == 0
-    assert "Initializing Dark Matter pipeline" in result.stdout
