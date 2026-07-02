@@ -241,7 +241,7 @@ def build_targeted_theoretical_dataframe(
     dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
     for deps in package_transitive_deps.values():
         for dep in deps:
-            dependency_parent_count[dep] += 1
+            dependency_parent_count[dep] = dependency_parent_count.get(dep, 0) + 1
 
     # 3. Isolate the target's closure
     target_deps = package_transitive_deps[target]
@@ -327,7 +327,7 @@ def build_compare_theoretical_dataframe(
     dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
     for deps in package_transitive_deps.values():
         for dep in deps:
-            dependency_parent_count[dep] += 1
+            dependency_parent_count[dep] = dependency_parent_count.get(dep, 0) + 1
 
     # Isolate the union of all targets' closures for batch network resolution
     resolution_set = set(valid_targets)
@@ -417,7 +417,7 @@ def build_explain_theoretical_dataframe(
     dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
     for deps in package_transitive_deps.values():
         for dep in deps:
-            dependency_parent_count[dep] += 1
+            dependency_parent_count[dep] = dependency_parent_count.get(dep, 0) + 1
 
     # 3. Isolate the target's closure
     target_deps = package_transitive_deps[target]
