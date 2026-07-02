@@ -253,12 +253,40 @@ def explain(
             target_msg=f"[yellow]Resolving data for {package}...[/yellow]",
         )
 
-        if is_theoretical:
-            df = build_explain_theoretical_dataframe(
-                metadata, target=package, arch=arch
-            )
-        else:
-            df = build_explain_analysis_dataframe(metadata, prefix, target=package)
+        try:
+            if is_theoretical:
+                df = build_explain_theoretical_dataframe(
+                    metadata, target=package, arch=arch
+                )
+            else:
+                df = build_explain_analysis_dataframe(metadata, prefix, target=package)
+
+        except ValueError as e:
+            # Intercept the specific missing package error for physical installations
+            if not is_theoretical and "not found in the local installation" in str(e):
+                # Suspend the pipeline and prompt for state pivot
+                fallback = typer.confirm(
+                    f"\nPackage '{package}' is not installed. Fall back to the theoretical catalog?",
+                    default=True,
+                )
+
+                if not fallback:
+                    raise typer.Exit(code=1) from None
+
+                # Mutate state to theoretical and fetch the full catalog metadata
+                is_theoretical = True
+                _, metadata, _ = load_ecosystem_context(
+                    ExportSource.catalog,
+                    console,
+                    target_msg="[yellow]Loading theoretical catalog...[/yellow]",
+                )
+
+                df = build_explain_theoretical_dataframe(
+                    metadata, target=package, arch=arch
+                )
+            else:
+                # Bubble up unrelated ValueErrors to the context manager
+                raise
 
         display.render_explain_table(df, target=package, is_theoretical=is_theoretical)
 
