@@ -7,7 +7,21 @@ from typing import Any
 import typer
 from rich.console import Console
 
-from dark_matter import __version__, core, display, homebrew
+from dark_matter import (
+    __version__,
+    build_analysis_dataframe,
+    build_compare_analysis_dataframe,
+    build_compare_theoretical_dataframe,
+    build_explain_analysis_dataframe,
+    build_explain_theoretical_dataframe,
+    build_targeted_analysis_dataframe,
+    build_targeted_theoretical_dataframe,
+    build_theoretical_dataframe,
+    display,
+    get_brew_metadata,
+    get_brew_prefix,
+    get_theoretical_catalog,
+)
 
 app = typer.Typer(
     help="Analyze dependency bloat and storage mass of macOS Homebrew installations.",
@@ -46,17 +60,17 @@ def load_ecosystem_context(
     source: ExportSource, active_console: Console, target_msg: str | None = None
 ) -> tuple[Path, dict[str, Any], bool]:
     """Resolve the prefix and ingest the metadata payload while managing UI state."""
-    prefix = homebrew.get_brew_prefix()
+    prefix = get_brew_prefix()
     is_theoretical = source == ExportSource.catalog
 
     if not is_theoretical:
         msg = target_msg or "[yellow]Scanning physical disk footprint...[/yellow]"
         with active_console.status(msg):
-            metadata = homebrew.get_brew_metadata()
+            metadata = get_brew_metadata()
     else:
         msg = target_msg or "[yellow]Computing theoretical ecosystem DAG...[/yellow]"
         with active_console.status(msg):
-            metadata = homebrew.get_theoretical_catalog(prefix)
+            metadata = get_theoretical_catalog(prefix)
 
     return prefix, metadata, is_theoretical
 
@@ -104,7 +118,7 @@ def analyze(
         )
 
         with console.status("[yellow]Computing fractional attribution DAG...[/yellow]"):
-            df = core.build_analysis_dataframe(metadata, prefix)
+            df = build_analysis_dataframe(metadata, prefix)
 
         display.render_bloat_table(
             df, sort_by=sort_by, top_n=top_n, fractional=fractional
@@ -126,7 +140,7 @@ def leaderboard(
         _, metadata, _ = load_ecosystem_context(ExportSource.catalog, console)
 
         with console.status("[yellow]Processing massive theoretical DAG...[/yellow]"):
-            df = core.build_theoretical_dataframe(metadata, arch=arch)
+            df = build_theoretical_dataframe(metadata, arch=arch)
 
         display.render_bloat_table(
             df, sort_by=sort_by, top_n=top_n, fractional=True, is_theoretical=True
@@ -150,13 +164,11 @@ def inspect(
         )
 
         if is_theoretical:
-            df = core.build_targeted_theoretical_dataframe(
+            df = build_targeted_theoretical_dataframe(
                 metadata, target=package, arch=arch
             )
         else:
-            df = core.build_targeted_analysis_dataframe(
-                metadata, prefix, target=package
-            )
+            df = build_targeted_analysis_dataframe(metadata, prefix, target=package)
 
         display.render_bloat_table(
             df, sort_by="ratio", top_n=1, fractional=True, is_theoretical=is_theoretical
@@ -180,13 +192,11 @@ def compare(
         )
 
         if is_theoretical:
-            df = core.build_compare_theoretical_dataframe(
+            df = build_compare_theoretical_dataframe(
                 metadata, targets=packages, arch=arch
             )
         else:
-            df = core.build_compare_analysis_dataframe(
-                metadata, prefix, targets=packages
-            )
+            df = build_compare_analysis_dataframe(metadata, prefix, targets=packages)
 
         display.render_bloat_table(
             df,
@@ -213,9 +223,9 @@ def export(
             "[yellow]Computing fractional attribution DAG...[/yellow]"
         ):
             if is_theoretical:
-                df = core.build_theoretical_dataframe(metadata, arch=arch)
+                df = build_theoretical_dataframe(metadata, arch=arch)
             else:
-                df = core.build_analysis_dataframe(metadata, prefix)
+                df = build_analysis_dataframe(metadata, prefix)
 
         if format == ExportFormat.csv:
             sys.stdout.write(df.to_csv(index=False))
@@ -243,11 +253,11 @@ def explain(
         )
 
         if is_theoretical:
-            df = core.build_explain_theoretical_dataframe(
+            df = build_explain_theoretical_dataframe(
                 metadata, target=package, arch=arch
             )
         else:
-            df = core.build_explain_analysis_dataframe(metadata, prefix, target=package)
+            df = build_explain_analysis_dataframe(metadata, prefix, target=package)
 
         display.render_explain_table(df, target=package, is_theoretical=is_theoretical)
 
