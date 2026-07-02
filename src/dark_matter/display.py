@@ -96,3 +96,36 @@ def render_bloat_table(
         )
 
     console.print(table)
+
+
+def render_explain_table(
+    df: pd.DataFrame, target: str, is_theoretical: bool = False
+) -> None:
+    """Render the dependency breakdown table for a specific package."""
+    if df.empty:
+        console.print(f"[green]'{target}' has no transitive dependencies.[/green]")
+        return
+
+    table = Table(
+        title=f"[bold]Dependency Breakdown: {target}[/bold]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+
+    size_col = "Archive_Bytes" if is_theoretical else "Core_Bytes"
+    size_label = "Archive Size" if is_theoretical else "Core Size"
+
+    table.add_column("Dependency", style="white", no_wrap=True)
+    table.add_column(size_label, justify="right", style="dim")
+    table.add_column("Shared By", justify="right", style="dim")
+    table.add_column("Attributed Size", justify="right", style="magenta")
+
+    for _, row in df.iterrows():
+        table.add_row(
+            str(row["Dependency"]),
+            format_bytes(row[size_col]),
+            str(int(row["Shared_By"])),
+            format_bytes(row["Attributed_Bytes"]),
+        )
+
+    console.print(table)

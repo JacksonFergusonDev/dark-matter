@@ -257,5 +257,57 @@ def export(
         raise typer.Exit(code=1) from e
 
 
+@app.command()
+def explain(
+    package: str = typer.Argument(
+        ..., help="The specific package to analyze dependencies for."
+    ),
+    source: ExportSource = typer.Option(
+        ExportSource.installed,
+        "--source",
+        "-s",
+        help="Data source: 'installed' (physical) or 'catalog' (theoretical).",
+    ),
+    arch: str = typer.Option(
+        "arm64_tahoe",
+        "--arch",
+        "-a",
+        help="Target architecture profile (catalog only).",
+    ),
+) -> None:
+    """Break down the bloat of a package by its dependencies."""
+    console.print(
+        f"[bold cyan]Explaining fractional dependencies for '{package}'...[/bold cyan]"
+    )
+
+    try:
+        prefix = homebrew.get_brew_prefix()
+
+        if source == ExportSource.installed:
+            with console.status(
+                f"[yellow]Scanning physical disk footprint for {package}...[/yellow]"
+            ):
+                metadata = homebrew.get_brew_metadata()
+                df = core.build_explain_analysis_dataframe(
+                    metadata, prefix, target=package
+                )
+                is_theoretical = False
+        else:
+            with console.status(
+                f"[yellow]Computing theoretical closure for {package}...[/yellow]"
+            ):
+                metadata = homebrew.get_theoretical_catalog(prefix)
+                df = core.build_explain_theoretical_dataframe(
+                    metadata, target=package, arch=arch
+                )
+                is_theoretical = True
+
+        display.render_explain_table(df, target=package, is_theoretical=is_theoretical)
+
+    except (RuntimeError, ValueError) as e:
+        console.print(f"[bold red]Pipeline Error:[/bold red] {e}")
+        raise typer.Exit(code=1) from e
+
+
 if __name__ == "__main__":
     app()

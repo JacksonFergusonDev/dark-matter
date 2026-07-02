@@ -385,3 +385,153 @@ def build_compare_theoretical_dataframe(
         )
 
     return pd.DataFrame(results)
+
+
+def build_explain_theoretical_dataframe(
+    metadata: dict[str, Any], target: str, arch: str = "arm64_tahoe"
+) -> pd.DataFrame:
+    """Constructs a DataFrame detailing the fractional cost of each dependency for a target."""
+    formulae = metadata.get("formulae", [])
+    casks = metadata.get("casks", [])
+    packages = formulae + casks
+
+    dependency_graph: dict[str, list[str]] = {}
+    pkg_data_map = {}
+
+    # 1. Build the global topology
+    for pkg in packages:
+        name = pkg["name"]
+        if isinstance(name, list):
+            name = name[0]
+        dependency_graph[name] = pkg.get("dependencies", [])
+        pkg_data_map[name] = pkg
+
+    if target not in dependency_graph:
+        raise ValueError(f"Package '{target}' not found in the catalog.")
+
+    # 2. Compute global in-degrees for accurate fractional attribution
+    package_transitive_deps = {
+        pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
+    }
+
+    dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
+    for deps in package_transitive_deps.values():
+        for dep in deps:
+            dependency_parent_count[dep] += 1
+
+    # 3. Isolate the target's closure
+    target_deps = package_transitive_deps[target]
+    resolution_set = {target} | target_deps
+
+    # 4. Resolve bottle sizes ONLY for the target's closure
+    package_digest: dict[str, str] = {}
+    bottles: dict[str, str] = {}
+
+    for name in resolution_set:
+        pkg = pkg_data_map[name]
+        files = pkg.get("bottle", {}).get("stable", {}).get("files", {})
+        file_info = files.get(arch) or next(iter(files.values()), None)
+
+        if file_info is not None:
+            digest = file_info.get("sha256", "")
+            url = file_info.get("url", "")
+            if digest and url:
+                package_digest[name] = digest
+                bottles[digest] = url
+
+    cache = homebrew.load_bottle_size_cache()
+    resolved_sizes = homebrew.resolve_bottle_sizes(bottles, cache)
+    homebrew.save_bottle_size_cache(cache)
+
+    size_map: dict[str, int] = {
+        name: resolved_sizes.get(digest, 0) for name, digest in package_digest.items()
+    }
+
+    # 5. Build the dependency breakdown
+    results = []
+    for dep in target_deps:
+        dep_size = size_map.get(dep, 0)
+        parents = dependency_parent_count.get(dep, 1)
+        attributed_size = dep_size / parents
+
+        results.append(
+            {
+                "Dependency": dep,
+                "Archive_Bytes": dep_size,
+                "Shared_By": parents,
+                "Attributed_Bytes": attributed_size,
+            }
+        )
+
+    df = pd.DataFrame(results)
+    if not df.empty:
+        # Sort by the actual fractional cost to the user's system
+        df = df.sort_values(by="Attributed_Bytes", ascending=False)
+
+    return df
+
+
+def build_explain_analysis_dataframe(
+    metadata: dict[str, Any], prefix: Path, target: str
+) -> pd.DataFrame:
+    """Constructs a DataFrame detailing the physical disk cost of each dependency for a target."""
+    formulae = metadata.get("formulae", [])
+    casks = metadata.get("casks", [])
+    packages = formulae + casks
+
+    dependency_graph: dict[str, list[str]] = {}
+    size_map: dict[str, int] = {}
+
+    # 1. Build the global topology and physical size map
+    for pkg in packages:
+        name = pkg["name"]
+        if isinstance(name, list):
+            name = name[0]
+        dependency_graph[name] = pkg.get("dependencies", [])
+
+        cellar_path = prefix / "Cellar" / name
+        cask_path = prefix / "Caskroom" / name
+
+        if cellar_path.exists():
+            size_map[name] = homebrew.get_directory_size(cellar_path)
+        elif cask_path.exists():
+            size_map[name] = homebrew.get_directory_size(cask_path)
+        else:
+            size_map[name] = 0
+
+    if target not in dependency_graph:
+        raise ValueError(f"Package '{target}' not found in the local installation.")
+
+    # 2. Compute global in-degrees for accurate fractional attribution
+    package_transitive_deps = {
+        pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
+    }
+
+    dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
+    for deps in package_transitive_deps.values():
+        for dep in deps:
+            dependency_parent_count[dep] = dependency_parent_count.get(dep, 0) + 1
+
+    # 3. Build the dependency breakdown using physical bytes
+    target_deps = package_transitive_deps[target]
+    results = []
+
+    for dep in target_deps:
+        dep_size = size_map.get(dep, 0)
+        parents = dependency_parent_count.get(dep, 1)
+        attributed_size = dep_size / parents if parents > 0 else dep_size
+
+        results.append(
+            {
+                "Dependency": dep,
+                "Core_Bytes": dep_size,
+                "Shared_By": parents,
+                "Attributed_Bytes": attributed_size,
+            }
+        )
+
+    df = pd.DataFrame(results)
+    if not df.empty:
+        df = df.sort_values(by="Attributed_Bytes", ascending=False)
+
+    return df
