@@ -535,3 +535,138 @@ def build_explain_analysis_dataframe(
         df = df.sort_values(by="Attributed_Bytes", ascending=False)
 
     return df
+
+
+def build_targeted_analysis_dataframe(
+    metadata: dict[str, Any], prefix: Path, target: str
+) -> pd.DataFrame:
+    """Constructs a DataFrame for a single installed target using physical disk measurements."""
+    formulae = metadata.get("formulae", [])
+    casks = metadata.get("casks", [])
+    packages = formulae + casks
+
+    dependency_graph: dict[str, list[str]] = {}
+    size_map: dict[str, int] = {}
+
+    for pkg in packages:
+        name = pkg["name"]
+        if isinstance(name, list):
+            name = name[0]
+        dependency_graph[name] = pkg.get("dependencies", [])
+
+        cellar_path = prefix / "Cellar" / name
+        cask_path = prefix / "Caskroom" / name
+
+        if cellar_path.exists():
+            size_map[name] = homebrew.get_directory_size(cellar_path)
+        elif cask_path.exists():
+            size_map[name] = homebrew.get_directory_size(cask_path)
+        else:
+            size_map[name] = 0
+
+    if target not in dependency_graph:
+        raise ValueError(f"Package '{target}' not found in the local installation.")
+
+    package_transitive_deps = {
+        pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
+    }
+
+    dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
+    for deps in package_transitive_deps.values():
+        for dep in deps:
+            dependency_parent_count[dep] = dependency_parent_count.get(dep, 0) + 1
+
+    target_deps = package_transitive_deps[target]
+    core_size = size_map.get(target, 0)
+    standard_recursive_size = core_size + sum(size_map.get(d, 0) for d in target_deps)
+
+    fractional_dep_size = sum(
+        size_map.get(d, 0) / dependency_parent_count.get(d, 1) for d in target_deps
+    )
+    weighted_recursive_size = core_size + fractional_dep_size
+    ratio = (weighted_recursive_size / core_size) if core_size > 0 else 1.0
+
+    return pd.DataFrame(
+        [
+            {
+                "Package": target,
+                "Core_Bytes": core_size,
+                "Standard_Bytes": standard_recursive_size,
+                "Weighted_Bytes": weighted_recursive_size,
+                "Bloat_Ratio": ratio,
+                "Dep_Count": len(target_deps),
+                "Is_Leaf": True,
+            }
+        ]
+    )
+
+
+def build_compare_analysis_dataframe(
+    metadata: dict[str, Any], prefix: Path, targets: list[str]
+) -> pd.DataFrame:
+    """Constructs a DataFrame for multiple installed targets using physical disk measurements."""
+    formulae = metadata.get("formulae", [])
+    casks = metadata.get("casks", [])
+    packages = formulae + casks
+
+    dependency_graph: dict[str, list[str]] = {}
+    size_map: dict[str, int] = {}
+
+    for pkg in packages:
+        name = pkg["name"]
+        if isinstance(name, list):
+            name = name[0]
+        dependency_graph[name] = pkg.get("dependencies", [])
+
+        cellar_path = prefix / "Cellar" / name
+        cask_path = prefix / "Caskroom" / name
+
+        if cellar_path.exists():
+            size_map[name] = homebrew.get_directory_size(cellar_path)
+        elif cask_path.exists():
+            size_map[name] = homebrew.get_directory_size(cask_path)
+        else:
+            size_map[name] = 0
+
+    valid_targets = [t for t in targets if t in dependency_graph]
+    if not valid_targets:
+        raise ValueError(
+            "None of the specified packages were found in the local installation."
+        )
+
+    package_transitive_deps = {
+        pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
+    }
+
+    dependency_parent_count: dict[str, int] = dict.fromkeys(dependency_graph, 0)
+    for deps in package_transitive_deps.values():
+        for dep in deps:
+            dependency_parent_count[dep] = dependency_parent_count.get(dep, 0) + 1
+
+    results = []
+    for target in valid_targets:
+        target_deps = package_transitive_deps[target]
+        core_size = size_map.get(target, 0)
+        standard_recursive_size = core_size + sum(
+            size_map.get(d, 0) for d in target_deps
+        )
+
+        fractional_dep_size = sum(
+            size_map.get(d, 0) / dependency_parent_count.get(d, 1) for d in target_deps
+        )
+        weighted_recursive_size = core_size + fractional_dep_size
+        ratio = (weighted_recursive_size / core_size) if core_size > 0 else 1.0
+
+        results.append(
+            {
+                "Package": target,
+                "Core_Bytes": core_size,
+                "Standard_Bytes": standard_recursive_size,
+                "Weighted_Bytes": weighted_recursive_size,
+                "Bloat_Ratio": ratio,
+                "Dep_Count": len(target_deps),
+                "Is_Leaf": True,
+            }
+        )
+
+    return pd.DataFrame(results)
