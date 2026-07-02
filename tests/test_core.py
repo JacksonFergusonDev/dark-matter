@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pandas as pd
+import pytest
 
 from dark_matter import core
 
@@ -82,3 +83,60 @@ def test_build_theoretical_dataframe(mocker, mock_brew_metadata):
 
     df = core.build_theoretical_dataframe(mock_brew_metadata, arch="arm64_tahoe")
     assert not df.empty
+
+
+def test_build_targeted_analysis_dataframe_missing(mock_brew_metadata):
+    """Ensure ValueError is raised if targeted physical tracking misses the topology index."""
+    with pytest.raises(ValueError, match="not found in the local installation"):
+        core.build_targeted_analysis_dataframe(
+            mock_brew_metadata, Path("/mock"), "missing-pkg"
+        )
+
+
+def test_build_compare_analysis_dataframe_partial_matches(
+    mocker, mock_brew_metadata, mock_brew_sizes
+):
+    """Verify comparison structures filter invalid targets while correctly resolving remaining ones."""
+
+    def mock_get_directory_size(path: Path) -> int:
+        return int(mock_brew_sizes.get(path.name, 0))
+
+    mocker.patch(
+        "dark_matter.homebrew.get_directory_size", side_effect=mock_get_directory_size
+    )
+    mocker.patch("pathlib.Path.exists", return_value=True)
+
+    df = core.build_compare_analysis_dataframe(
+        mock_brew_metadata, Path("/mock"), ["pkg-b", "invalid-pkg"]
+    )
+    assert len(df) == 1
+    assert df.iloc[0]["Package"] == "pkg-b"
+
+
+def test_build_explain_analysis_dataframe_valid(
+    mocker, mock_brew_metadata, mock_brew_sizes
+):
+    """Verify the localized dependency attribution breakdown calculations for single formulas."""
+
+    def mock_get_directory_size(path: Path) -> int:
+        return int(mock_brew_sizes.get(path.name, 0))
+
+    mocker.patch(
+        "dark_matter.homebrew.get_directory_size", side_effect=mock_get_directory_size
+    )
+    mocker.patch("pathlib.Path.exists", return_value=True)
+
+    df = core.build_explain_analysis_dataframe(
+        mock_brew_metadata, Path("/mock"), "pkg-a"
+    )
+    # pkg-a has dependencies pkg-b and pkg-c
+    assert "pkg-b" in df["Dependency"].values
+    assert "pkg-c" in df["Dependency"].values
+
+
+def test_build_targeted_theoretical_dataframe_bounds(mock_brew_metadata):
+    """Verify theoretical missing target validations throw catalog lookup errors."""
+    with pytest.raises(ValueError, match="not found in the catalog"):
+        core.build_targeted_theoretical_dataframe(
+            mock_brew_metadata, "non-existent", "arm64_tahoe"
+        )

@@ -1,7 +1,9 @@
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
+import requests
 
 from dark_matter import homebrew
 
@@ -55,3 +57,52 @@ def test_fetch_bottle_size(mocker):
     size = homebrew._fetch_bottle_size(url)
 
     assert size == 1048576
+
+
+def test_get_directory_size_permission_error(tmp_path, mocker):
+    """Verify PermissionError handles unreadable path contexts smoothly."""
+    test_dir = tmp_path / "protected"
+    test_dir.mkdir()
+    mocker.patch("os.scandir", side_effect=PermissionError)
+
+    assert homebrew.get_directory_size(test_dir) == 0
+
+
+def test_parse_repository_edge_cases():
+    """Verify OCI repository signature extraction rules on matching boundaries."""
+    assert homebrew._parse_repository("https://invalid.url/blob") is None
+    assert (
+        homebrew._parse_repository(
+            "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abc"
+        )
+        == "homebrew/core/wget"
+    )
+
+
+def test_fetch_ghcr_token_failure(mocker):
+    """Verify authentication requests fail down gracefully inside standard networks."""
+    mocker.patch("requests.get", side_effect=requests.RequestException)
+    assert homebrew._fetch_ghcr_token("homebrew/core", timeout=1.0) is None
+
+
+def test_load_api_cache_jws_handling(tmp_path):
+    """Verify decryption workflows extract proper payload list metadata configurations."""
+    jws_file = tmp_path / "formula.jws.json"
+    json_file = tmp_path / "formula.json"
+
+    # Write a mock valid JWS wrapper structure
+    valid_payload = json.dumps([{"name": "test-pkg", "dependencies": []}])
+    jws_file.write_text(json.dumps({"payload": valid_payload}), encoding="utf-8")
+
+    data = homebrew._load_api_cache(json_file, jws_file)
+    assert len(data) == 1
+    assert data[0]["name"] == "test-pkg"
+
+
+def test_load_api_cache_corrupt_payload(tmp_path):
+    """Verify fallback actions drop invalid lists gracefully."""
+    jws_file = tmp_path / "formula.jws.json"
+    json_file = tmp_path / "formula.json"
+
+    jws_file.write_text(json.dumps({"payload": "{corrupt-json"}), encoding="utf-8")
+    assert homebrew._load_api_cache(json_file, jws_file) == []
