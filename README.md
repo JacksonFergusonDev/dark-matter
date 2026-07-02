@@ -30,6 +30,7 @@ The ratio between the two — the **Bloat Ratio** — is the headline number. A 
   - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts.
   - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula and cask catalog from the local API cache, without requiring anything to be installed.
   - `inspect` & `compare` — targeted O(1) theoretical resolution for individual or grouped packages without resolving the entire ecosystem payload.
+  - `explain` — breaks down a target package's bloat by attributing fractional byte costs to each of its transitive dependencies.
   - `export` — streams the underlying DataFrames to CSV or JSON for integration into external data pipelines.
 - **Fractional Attribution Model** — shared dependencies (`openssl`, `python`, etc.) are divided proportionally across all parent packages instead of being double-counted, giving an honest per-package cost.
 - **Daemon-free** — no background indexing, no persistent database. Every run is a fresh, on-demand computation.
@@ -37,7 +38,7 @@ The ratio between the two — the **Bloat Ratio** — is the headline number. A 
 
 ## A note on theoretical measurements
 
-`leaderboard`, `inspect`, and `compare` rely on `Content-Length` headers from `ghcr.io` blob storage, which report *compressed* archive size, not the size a package occupies once unpacked to disk. The absolute numbers they report will therefore run lower than `analyze`'s physical measurements.
+`leaderboard`, `inspect`, `compare`, and `explain` rely on `Content-Length` headers from `ghcr.io` blob storage, which report *compressed* archive size, not the size a package occupies once unpacked to disk. The absolute numbers they report will therefore run lower than `analyze`'s physical measurements.
 
 The Bloat Ratio, however, stays meaningful. Since most bottles compress with similar algorithms (gzip or zstd), the compression factor $c$ appears in both the numerator and denominator and cancels out:
 
@@ -64,6 +65,9 @@ dark-matter leaderboard
 
 # Evaluate a specific formula instantly
 dark-matter inspect uv
+
+# Break down the dependency bloat of a specific package
+dark-matter explain uv
 
 # Compare multiple packages side-by-side
 dark-matter compare uv poetry pdm
@@ -95,6 +99,7 @@ All commands accept the global `--verbose` / `-v` flag for debug logging, and `-
 | Argument/Flag | Default | Description |
 | --- | --- | --- |
 | `[PACKAGE]` | **Required** | The target package to analyze |
+| `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
 | `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
 
 ### `compare`
@@ -103,6 +108,15 @@ All commands accept the global `--verbose` / `-v` flag for debug logging, and `-
 | --- | --- | --- |
 | `[PACKAGES]...` | **Required** | A space-separated list of packages to compare |
 | `--sort` / `-s` | `ratio` | Sort by `ratio`, `core`, or `recursive` |
+| `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
+| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
+
+### `explain`
+
+| Argument/Flag | Default | Description |
+| --- | --- | --- |
+| `[PACKAGE]` | **Required** | The specific package to analyze |
+| `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
 | `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
 
 ### `export`
