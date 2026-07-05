@@ -130,8 +130,8 @@ def test_build_explain_analysis_dataframe_valid(
         mock_brew_metadata, Path("/mock"), "pkg-a"
     )
     # pkg-a has dependencies pkg-b and pkg-c
-    assert "pkg-b" in df["Dependency"].values
-    assert "pkg-c" in df["Dependency"].values
+    assert "pkg-b" in df["Dependency"].to_numpy()
+    assert "pkg-c" in df["Dependency"].to_numpy()
 
 
 def test_build_targeted_theoretical_dataframe_bounds(mock_brew_metadata):

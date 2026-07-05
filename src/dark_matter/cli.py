@@ -211,7 +211,7 @@ def compare(
 @app.command()
 def export(
     source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
-    format: ExportFormat = typer.Option(ExportFormat.csv, "--format", "-f"),
+    export_format: ExportFormat = typer.Option(ExportFormat.csv, "--format", "-f"),
     arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
 ) -> None:
     """Export the computed bloat analysis dataframe for external pipelines."""
@@ -228,7 +228,7 @@ def export(
             else:
                 df = build_analysis_dataframe(metadata, prefix)
 
-        if format == ExportFormat.csv:
+        if export_format == ExportFormat.csv:
             sys.stdout.write(df.to_csv(index=False))
         else:
             sys.stdout.write(df.to_json(orient="records", indent=2))
