@@ -34,7 +34,7 @@ jobs:
     uses: JacksonFergusonDev/ci-cd-tooling/.github/workflows/update-homebrew.yml@9300b4398eaedd7f3b369614433b38680e42ef02 # main
     with:
       tag: ${{ github.ref_name }}
-      package_name: "protostar"
-      formula_path: "Formula/protostar.rb"
+      package_name: "dark-matter"
+      formula_path: "Formula/dark-matter.rb"
     secrets:
       TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
