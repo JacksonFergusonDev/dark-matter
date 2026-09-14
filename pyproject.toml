@@ -1,6 +1,6 @@
 [project]
 name = "dark-matter-cli"
-version = "0.1.0"
+version = "0.1.1"
 description = "A dependency-graph-aware storage profiler for Homebrew."
 readme = "README.md"
 authors = [{ name = "Jackson Ferguson", email = "jackson.ferguson0@gmail.com" }]
