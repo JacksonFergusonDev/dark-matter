@@ -8,7 +8,7 @@ from typing import Any
 import typer
 from rich.console import Console
 
-from dark_matter import (
+from dark_matter_cli import (
     __version__,
     build_analysis_dataframe,
     build_compare_analysis_dataframe,

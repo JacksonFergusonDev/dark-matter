@@ -5,7 +5,7 @@ import importlib.metadata
 
 __version__ = "unknown"
 with contextlib.suppress(importlib.metadata.PackageNotFoundError):
-    __version__ = importlib.metadata.version("dark-matter")
+    __version__ = importlib.metadata.version("dark-matter-cli")
 
 from .core import (
     build_analysis_dataframe,

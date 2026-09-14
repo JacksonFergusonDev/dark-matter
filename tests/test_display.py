@@ -1,6 +1,6 @@
 import pandas as pd
 
-from dark_matter import display
+from dark_matter_cli import display
 
 
 def test_format_bytes():
@@ -21,7 +21,7 @@ def test_render_bloat_table_empty(capsys):
 
 def test_render_bloat_table_with_severe_ratios(mocker):
     """Exercise layout components and ratio string styling ranges (severe vs clean)."""
-    mock_console_print = mocker.patch("dark_matter.display.console.print")
+    mock_console_print = mocker.patch("dark_matter_cli.display.console.print")
     df = pd.DataFrame(
         [
             {

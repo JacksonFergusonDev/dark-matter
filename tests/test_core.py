@@ -3,7 +3,7 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from dark_matter import core
+from dark_matter_cli import core
 
 
 def test_get_all_dependencies():
@@ -31,7 +31,8 @@ def test_build_analysis_dataframe(mocker, mock_brew_metadata, mock_brew_sizes):
         return int(mock_brew_sizes.get(pkg_name, 0))
 
     mocker.patch(
-        "dark_matter.homebrew.get_directory_size", side_effect=mock_get_directory_size
+        "dark_matter_cli.homebrew.get_directory_size",
+        side_effect=mock_get_directory_size,
     )
 
     # Ensure all mock directories appear to "exist" for the core logic
@@ -63,11 +64,12 @@ def test_build_analysis_dataframe(mocker, mock_brew_metadata, mock_brew_sizes):
 
 def test_build_theoretical_dataframe(mocker, mock_brew_metadata):
     """Verify theoretical DAG execution uses resolved OCI blob sizes."""
-    mocker.patch("dark_matter.homebrew.load_bottle_size_cache", return_value={})
+    mocker.patch("dark_matter_cli.homebrew.load_bottle_size_cache", return_value={})
     mocker.patch(
-        "dark_matter.homebrew.resolve_bottle_sizes", return_value={"mock-digest": 500}
+        "dark_matter_cli.homebrew.resolve_bottle_sizes",
+        return_value={"mock-digest": 500},
     )
-    mocker.patch("dark_matter.homebrew.save_bottle_size_cache")
+    mocker.patch("dark_matter_cli.homebrew.save_bottle_size_cache")
 
     # Inject fake bottle data to trigger the resolution logic
     mock_brew_metadata["formulae"][0]["bottle"] = {
@@ -102,7 +104,8 @@ def test_build_compare_analysis_dataframe_partial_matches(
         return int(mock_brew_sizes.get(path.name, 0))
 
     mocker.patch(
-        "dark_matter.homebrew.get_directory_size", side_effect=mock_get_directory_size
+        "dark_matter_cli.homebrew.get_directory_size",
+        side_effect=mock_get_directory_size,
     )
     mocker.patch("pathlib.Path.exists", return_value=True)
 
@@ -122,7 +125,8 @@ def test_build_explain_analysis_dataframe_valid(
         return int(mock_brew_sizes.get(path.name, 0))
 
     mocker.patch(
-        "dark_matter.homebrew.get_directory_size", side_effect=mock_get_directory_size
+        "dark_matter_cli.homebrew.get_directory_size",
+        side_effect=mock_get_directory_size,
     )
     mocker.patch("pathlib.Path.exists", return_value=True)
 

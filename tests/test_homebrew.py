@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from dark_matter import homebrew
+from dark_matter_cli import homebrew
 
 
 def test_get_brew_prefix(mocker):
@@ -45,7 +45,9 @@ def test_get_directory_size(tmp_path):
 
 def test_fetch_bottle_size(mocker):
     """Verify ghcr.io blob header parsing."""
-    mocker.patch("dark_matter.homebrew._fetch_ghcr_token", return_value="mock_token")
+    mocker.patch(
+        "dark_matter_cli.homebrew._fetch_ghcr_token", return_value="mock_token"
+    )
 
     mock_resp = mocker.Mock()
     mock_resp.headers = {"Content-Length": "1048576"}

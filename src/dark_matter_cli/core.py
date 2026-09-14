@@ -3,7 +3,7 @@ from typing import Any
 
 import pandas as pd
 
-from dark_matter import homebrew
+from dark_matter_cli import homebrew
 
 
 def _build_global_topology(

@@ -9,7 +9,7 @@ from typing import Any
 
 import requests
 
-logger = logging.getLogger("dark_matter")
+logger = logging.getLogger("dark_matter_cli")
 
 
 def get_brew_prefix() -> Path:
@@ -158,7 +158,7 @@ def get_theoretical_catalog(prefix: Path) -> dict[str, list[dict[str, Any]]]:
     return {"formulae": formulae, "casks": casks}
 
 
-_GHCR_TOKEN_URL = "https://ghcr.io/token"
+_GHCR_TOKEN_URL = "https://ghcr.io/token"  # noqa: S105
 _BLOB_URL_PATTERN = re.compile(r"^https://ghcr\.io/v2/(?P<repo>.+)/blobs/sha256:")
 _BOTTLE_SIZE_CACHE_PATH = Path.home() / ".cache" / "dark-matter" / "bottle_sizes.json"
 

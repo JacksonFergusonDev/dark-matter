@@ -28,7 +28,7 @@ Issues = "https://github.com/jacksonfergusondev/dark-matter/issues"
 PyPI = "https://pypi.org/project/dark-matter-cli/"
 
 [project.scripts]
-dark-matter = "dark_matter.cli:app"
+dark-matter = "dark_matter_cli.cli:app"
 
 [build-system]
 requires = ["hatchling"]
@@ -80,7 +80,7 @@ ignore = ["D100", "D104", "D107", "E501", "S603", "S607"]
 convention = "google"
 
 [tool.ruff.lint.isort]
-known-first-party = ["dark_matter"]
+known-first-party = ["dark_matter_cli"]
 section-order = [
     "future",
     "standard-library",
@@ -121,11 +121,11 @@ testpaths = ["tests"]
 pythonpath = ["."]
 
 [tool.coverage.run]
-source = ["src/dark_matter"]
+source = ["src/dark_matter_cli"]
 branch = true
 
 [tool.coverage.report]
-omit = ["src/dark_matter/**/__init__.py"]
+omit = ["src/dark_matter_cli/**/__init__.py"]
 show_missing = true
 skip_covered = true
 fail_under = 85
