@@ -1,0 +1,60 @@
+{
+    "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+    "extends": [
+        "config:best-practices",
+        ":semanticCommits",
+        ":prHourlyLimit2"
+    ],
+    "ignorePaths": [
+        "docs/**",
+        "scripts/**",
+        "src/**",
+        "tests/**"
+    ],
+    "schedule": [
+        "before 4am on monday"
+    ],
+    "internalChecksFilter": "strict",
+    "rebaseWhen": "conflicted",
+    "labels": [
+        "dependencies",
+        "chore"
+    ],
+    "vulnerabilityAlerts": {
+        "schedule": [
+            "at any time"
+        ]
+    },
+    "packageRules": [
+        {
+            "description": "Require a package to be 2 weeks old before updating, but exclude vulnerability remediation from this wait.",
+            "matchUpdateTypes": [
+                "major",
+                "minor",
+                "patch",
+                "pin",
+                "digest"
+            ],
+            "minimumReleaseAge": "2 weeks"
+        },
+        {
+            "description": "Group all python dev-dependencies (ruff, mypy, pytest) into one PR and automerge them.",
+            "matchFileNames": [
+                "pyproject.toml"
+            ],
+            "matchDepTypes": [
+                "dependency-groups"
+            ],
+            "groupName": "python-dev-tools",
+            "automerge": true
+        },
+        {
+            "description": "Group GitHub Actions updates and automerge them.",
+            "matchManagers": [
+                "github-actions"
+            ],
+            "groupName": "github-actions",
+            "automerge": true
+        }
+    ]
+}

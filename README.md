@@ -1,13 +1,18 @@
+<!-- rumdl-disable-file first-line-heading -->
+<div align="center">
+
 # Dark Matter
+
+**A dependency-graph-aware storage profiler for Homebrew.**
 
 [![CI](https://img.shields.io/github/actions/workflow/status/JacksonFergusonDev/dark-matter/ci.yml?style=flat-square&color=white&labelColor=0A0A0A&label=CI)](https://github.com/JacksonFergusonDev/dark-matter/actions/workflows/ci.yml)
 [![Python](https://img.shields.io/badge/python-3.12+-white?style=flat-square&labelColor=0A0A0A)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/badge/style-ruff-white?style=flat-square&labelColor=0A0A0A)](https://github.com/astral-sh/ruff)
 [![Mypy](https://img.shields.io/badge/mypy-checked-white?style=flat-square&labelColor=0A0A0A)](https://mypy-lang.org/)
-[![pre-commit](https://img.shields.io/badge/pre--commit-enabled-white?style=flat-square&labelColor=0A0A0A)](https://github.com/pre-commit/pre-commit)
+[![prek](https://img.shields.io/badge/prek-enabled-white?style=flat-square&labelColor=black)](https://github.com/j178/prek)
 [![License](https://img.shields.io/badge/license-MIT-white?style=flat-square&labelColor=0A0A0A)](LICENSE)
 
-**A dependency-graph-aware storage profiler for Homebrew.**
+</div>
 
 ## Why
 
@@ -133,7 +138,7 @@ The project uses [`just`](https://github.com/casey/just) to wrap common tasks:
 
 ```bash
 just format       # ruff format + fix
-just lint         # ruff + markdownlint
+just lint         # ruff + rumdl
 just typecheck    # mypy
 just test         # pytest
 just test-cov     # pytest with coverage report
@@ -148,4 +153,4 @@ just ci           # the full pipeline CI runs, locally
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

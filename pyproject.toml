@@ -1,6 +1,7 @@
 [project]
-name = "dark-matter"
-version = "0.1.0"
+name = "dark-matter-cli"
+version = "0.0.0"
+description = "A dependency-graph-aware storage profiler for Homebrew."
 readme = "README.md"
 authors = [{ name = "Jackson Ferguson", email = "jackson.ferguson0@gmail.com" }]
 requires-python = ">=3.12"
@@ -18,11 +19,13 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
+    "License :: OSI Approved :: MIT License",
 ]
 
 [project.urls]
 Repository = "https://github.com/jacksonfergusondev/dark-matter"
 Issues = "https://github.com/jacksonfergusondev/dark-matter/issues"
+PyPI = "https://pypi.org/project/dark-matter-cli/"
 
 [project.scripts]
 dark-matter = "dark_matter.cli:app"
@@ -39,8 +42,9 @@ ci = [
     "pytest-cov>=7.0.0",
     "pytest-mock>=3.15.1",
     "ruff>=0.14.13",
+    "rumdl>=0.2.73",
 ]
-dev = [{ include-group = "ci" }, "bump-my-version>=1.2.6", "pre-commit>=4.5.1"]
+dev = [{ include-group = "ci" }, "prek>=0.5.3"]
 
 # ==================================================
 # Tool Configuration
@@ -50,7 +54,6 @@ dev = [{ include-group = "ci" }, "bump-my-version>=1.2.6", "pre-commit>=4.5.1"]
 
 [tool.ruff]
 target-version = "py312"
-extend-exclude = ["docs", "site"]
 
 [tool.ruff.lint]
 select = [
@@ -69,8 +72,9 @@ select = [
     "SIM", # flake8-simplify
     "T20", # flake8-print
     "UP",  # pyupgrade
+    "S",   # flake8-bandit (security)
 ]
-ignore = ["D100", "D104", "D107", "E501"]
+ignore = ["D100", "D104", "D107", "E501", "S603", "S607"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
@@ -86,7 +90,7 @@ section-order = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/*.py" = ["T201", "D"]
+"tests/*.py" = ["T201", "D", "S"]
 
 [tool.ruff.lint.flake8-bugbear]
 extend-immutable-calls = ["typer.Argument", "typer.Option"]
@@ -94,20 +98,20 @@ extend-immutable-calls = ["typer.Argument", "typer.Option"]
 # ---- mypy ---- #
 
 [tool.mypy]
+mypy_path = "src"
 python_version = "3.12"
+strict = true
 pretty = true
 show_error_codes = true
 show_error_context = true
-warn_return_any = true
-warn_unused_configs = true
-check_untyped_defs = true
-disallow_untyped_defs = true
 explicit_package_bases = true
-mypy_path = "src"
 
 [[tool.mypy.overrides]]
 module = ["tests.*"]
 disallow_untyped_defs = false
+disallow_incomplete_defs = false
+disallow_untyped_calls = false
+warn_return_any = false
 
 # ---- pytest ---- #
 
@@ -124,27 +128,47 @@ branch = true
 omit = ["src/dark_matter/**/__init__.py"]
 show_missing = true
 skip_covered = true
+fail_under = 85
 
-# ---- bump-my-version ---- #
+# ---- rumdl  ---- #
 
-[tool.bumpversion]
-current_version = "0.1.0"
-parse = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
-serialize = ["{major}.{minor}.{patch}"]
-search = "{current_version}"
-replace = "{new_version}"
-regex = false
-ignore_missing_version = false
-tag = false
-sign_tags = false
-tag_name = "v{new_version}"
-tag_message = "Bump version: {current_version} → {new_version}"
-allow_dirty = false
-commit = true
-message = "chore: bump version {current_version} → {new_version}"
-commit_args = ""
+[tool.rumdl]
+disable = [
+    "MD013", # line length - creates unnecessary diff churn
+    "MD033", # inline HTML – required for readme and parts of documentation
+    "MD077", # continuation line indentation – we intentionally use 4 spaces for visual clarity
+]
 
-[[tool.bumpversion.files]]
-filename = "pyproject.toml"
-search = 'version = "{current_version}"'
-replace = 'version = "{new_version}"'
+# --- Heading style ---
+# Enforce ATX style (# Heading) exclusively; setext (underlined) headings are not allowed
+[tool.rumdl.MD003]
+style = "atx"
+
+# --- Unordered list style ---
+# Use dash (-) for list markers – cleaner than * or +, and reduces git diff noise
+[tool.rumdl.MD004]
+style = "dash"
+
+# --- Trailing spaces ---
+# Allow exactly 2 spaces for hard line breaks (Markdown standard); flag any other stray whitespace
+[tool.rumdl.MD009]
+br-spaces = 2
+strict = false
+
+# --- Duplicate headings ---
+# Allow identical subheadings (e.g., "Parameters") as long as they appear under different parent headings
+[tool.rumdl.MD024]
+siblings-only = true
+
+# --- Ordered list numbering ---
+# Use "one" style (1., 1., 1.) so reordering list items doesn't create massive diff churn
+[tool.rumdl.MD029]
+style = "one"
+
+# --- Per‑directory overrides for docs/ ---
+# Relax rules that conflict with Zensical / Python‑Markdown extensions
+[tool.rumdl.per-file-ignores]
+"docs/**/*.md" = [
+    "MD041", # first line need not be a top‑level heading
+    "MD046", # code block style – Zensical extensions require mixing fenced and indented blocks for admonitions/tabs
+]
