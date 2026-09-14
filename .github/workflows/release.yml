@@ -31,7 +31,7 @@ jobs:
   sync-homebrew:
     name: Delegate Homebrew Update
     needs: build-n-publish
-    uses: JacksonFergusonDev/ci-cd-tooling/.github/workflows/update-homebrew.yml@070b23f6c704d9e34420a92fb9419f188f37274f # main
+    uses: JacksonFergusonDev/ci-cd-tooling/.github/workflows/update-homebrew.yml@597965691ea7d21f4f72929c6ff782a21d3f0243 # main
     with:
       tag: ${{ github.ref_name }}
       package_name: "dark-matter"
