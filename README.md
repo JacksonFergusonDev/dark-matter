@@ -5,7 +5,9 @@
 
 **A dependency-graph-aware storage profiler for Homebrew.**
 
+[![PyPI Version](https://img.shields.io/pypi/v/dark-matter-cli?style=flat-square&color=white&labelColor=0A0A0A&logo=pypi&logoColor=white)](https://pypi.org/project/dark-matter-cli/)
 [![CI](https://img.shields.io/github/actions/workflow/status/JacksonFergusonDev/dark-matter/ci.yml?style=flat-square&color=white&labelColor=0A0A0A&label=CI)](https://github.com/JacksonFergusonDev/dark-matter/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/actions/workflow/status/JacksonFergusonDev/dark-matter/release.yml?style=flat-square&color=white&labelColor=0A0A0A&label=Release)](https://github.com/JacksonFergusonDev/dark-matter/actions/workflows/release.yml)
 [![Python](https://img.shields.io/badge/python-3.12+-white?style=flat-square&labelColor=0A0A0A)](https://www.python.org/downloads/)
 [![Ruff](https://img.shields.io/badge/style-ruff-white?style=flat-square&labelColor=0A0A0A)](https://github.com/astral-sh/ruff)
 [![Mypy](https://img.shields.io/badge/mypy-checked-white?style=flat-square&labelColor=0A0A0A)](https://mypy-lang.org/)
