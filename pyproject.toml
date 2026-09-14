@@ -35,16 +35,16 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [dependency-groups]
-ci = [
+dev = [
     "mypy>=1.19.1",
     "pandas-stubs>=3.0.3.260530",
+    "prek>=0.5.3",
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "pytest-mock>=3.15.1",
     "ruff>=0.14.13",
     "rumdl>=0.2.73",
 ]
-dev = [{ include-group = "ci" }, "prek>=0.5.3"]
 
 # ==================================================
 # Tool Configuration

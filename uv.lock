@@ -346,15 +346,6 @@ dependencies = [
 ]
 
 [package.dev-dependencies]
-ci = [
-    { name = "mypy" },
-    { name = "pandas-stubs" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-    { name = "pytest-mock" },
-    { name = "ruff" },
-    { name = "rumdl" },
-]
 dev = [
     { name = "mypy" },
     { name = "pandas-stubs" },
@@ -375,15 +366,6 @@ requires-dist = [
 ]
 
 [package.metadata.requires-dev]
-ci = [
-    { name = "mypy", specifier = ">=1.19.1" },
-    { name = "pandas-stubs", specifier = ">=3.0.3.260530" },
-    { name = "pytest", specifier = ">=9.0.2" },
-    { name = "pytest-cov", specifier = ">=7.0.0" },
-    { name = "pytest-mock", specifier = ">=3.15.1" },
-    { name = "ruff", specifier = ">=0.14.13" },
-    { name = "rumdl", specifier = ">=0.2.73" },
-]
 dev = [
     { name = "mypy", specifier = ">=1.19.1" },
     { name = "pandas-stubs", specifier = ">=3.0.3.260530" },
