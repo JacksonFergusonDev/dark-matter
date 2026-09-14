@@ -31,7 +31,7 @@ jobs:
   sync-homebrew:
     name: Delegate Homebrew Update
     needs: build-n-publish
-    uses: JacksonFergusonDev/ci-cd-tooling/.github/workflows/update-homebrew.yml@e607b48f973106deebb3246d606498aad12fbd63 # main
+    uses: JacksonFergusonDev/ci-cd-release-infrastructure/.github/workflows/update-homebrew.yml@cff447baf1076b8807502ab8da7d2f0867a973fc # main
     with:
       tag: ${{ github.ref_name }}
       formula_path: "Formula/dark-matter.rb"
