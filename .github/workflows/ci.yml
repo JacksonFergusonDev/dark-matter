@@ -7,40 +7,59 @@ on:
     branches: [ "main" ]
 
 jobs:
-  build:
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      with:
+        enable-cache: true
+        python-version: "3.12"
+
+    - name: Install dependencies
+      run: uv sync --only-group ci --locked
+
+    - name: Run Ruff Linter
+      run: uv run ruff check --output-format=github .
+
+    - name: Run Ruff Formatter
+      run: uv run ruff format --check --output-format=github .
+
+    - name: Lint Markdown with rumdl
+      run: uv run rumdl check --output-format github .
+
+    - name: Check Markdown formatting with rumdl
+      run: uv run rumdl fmt --check --output-format github .
+
+    - name: Type check with Mypy
+      run: uv run mypy .
+
+  test:
     name: Test on ${{ matrix.os }} / Python ${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.12", "3.14"]
+        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
-    - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7
 
     - name: Install uv
-      uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
       with:
         enable-cache: true
-        cache-dependency-glob: "uv.lock"
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
-      run: uv sync --group ci
-
-    - name: Lint with Ruff
       run: |
-        uv run ruff check .
-        uv run ruff format --check .
-
-    - name: Lint Markdown
-      uses: DavidAnson/markdownlint-cli2-action@ded1f9488f68a970bc66ea5619e13e9b52e601cd # v23
-      with:
-        globs: '**/*.md'
-
-    - name: Type check with Mypy
-      run: uv run mypy .
+        uv sync --only-group ci --locked
+        uv pip install pytest-github-actions-annotate-failures
 
     - name: Run tests
       run: uv run pytest
