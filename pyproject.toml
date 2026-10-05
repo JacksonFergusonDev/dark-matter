@@ -26,6 +26,7 @@ classifiers = [
 Repository = "https://github.com/jacksonfergusondev/dark-matter"
 Issues = "https://github.com/jacksonfergusondev/dark-matter/issues"
 PyPI = "https://pypi.org/project/dark-matter-cli/"
+Author = "https://jacksonferguson.me"
 
 [project.scripts]
 dark-matter = "dark_matter_cli.cli:app"
