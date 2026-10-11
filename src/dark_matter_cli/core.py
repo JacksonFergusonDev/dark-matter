@@ -114,9 +114,7 @@ def _compute_bloat_metrics(
                 "Weighted_Bytes": weighted_recursive_size,
                 "Bloat_Ratio": ratio,
                 "Dep_Count": len(target_deps),
-                "Is_Leaf": dependency_parent_count.get(target, 0) == 0
-                if len(targets) > 1
-                else True,
+                "Is_Leaf": dependency_parent_count.get(target, 0) == 0,
             }
         )
 

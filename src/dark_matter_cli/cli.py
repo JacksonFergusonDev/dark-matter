@@ -188,7 +188,12 @@ def inspect(
             df = build_targeted_analysis_dataframe(metadata, prefix, target=package)
 
         display.render_bloat_table(
-            df, sort_by="ratio", top_n=1, fractional=True, is_theoretical=is_theoretical
+            df,
+            sort_by=SortKey.ratio,
+            top_n=1,
+            fractional=True,
+            is_theoretical=is_theoretical,
+            leaves_only=False,
         )
 
 
@@ -223,6 +228,7 @@ def compare(
             top_n=len(packages),
             fractional=True,
             is_theoretical=is_theoretical,
+            leaves_only=False,
         )
 
 
