@@ -278,3 +278,156 @@ def test_get_theoretical_catalog_missing(tmp_path):
     """Verify a missing cache names the searched directory."""
     with pytest.raises(RuntimeError, match=str(tmp_path)):
         homebrew.get_theoretical_catalog(tmp_path)
+
+
+def _write_jws(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"payload": json.dumps(payload), "signatures": []}))
+
+
+INTERNAL_PAYLOAD = {
+    "formulae": {
+        "wget": {
+            "stable_dependencies": ["openssl@4", {"pkgconf": ":build"}],
+            "stable_uses_from_macos": [["zlib"], [{"bison": ":build"}]],
+            "bottle_checksum": "abc",
+        },
+        "python@3.14": {"bottle_checksum": "def", "bottle_tag": ":all"},
+        "afl++": {"stable_dependencies": [{"llvm": [":build", ":test"]}]},
+    },
+    "casks": {
+        "brave-browser": {"names": ["Brave"], "depends_on_args": {":macos": ":any"}},
+        "azure-cli": {
+            "names": ["Azure CLI"],
+            "depends_on_args": {":formula": "python@3.14"},
+        },
+    },
+}
+
+
+def test_runtime_dependencies_excludes_build_and_test():
+    """Verify only runtime dependencies survive normalization."""
+    entries = ["a", {"b": ":build"}, {"c": [":build", ":test"]}, {"d": ":recommended"}]
+    assert homebrew._runtime_dependencies(entries) == ["a", "d"]
+
+
+def test_load_internal_catalog_formulae(tmp_path):
+    """Verify Homebrew 7 formulae are normalized to the legacy shape."""
+    path = tmp_path / "internal" / "packages.arm64_tahoe.jws.json"
+    _write_jws(path, INTERNAL_PAYLOAD)
+
+    formulae = {
+        f["name"]: f
+        for f in homebrew._load_internal_catalog(path, "arm64_tahoe")["formulae"]
+    }
+
+    assert formulae["wget"]["dependencies"] == ["openssl@4"]
+    assert formulae["wget"]["bottle"]["stable"]["files"] == {
+        "arm64_tahoe": {
+            "sha256": "abc",
+            "url": "https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abc",
+        }
+    }
+    python_files = formulae["python@3.14"]["bottle"]["stable"]["files"]
+    assert python_files["all"]["url"].startswith(
+        "https://ghcr.io/v2/homebrew/core/python/3.14/blobs/"
+    )
+    assert formulae["afl++"]["dependencies"] == []
+    assert "bottle" not in formulae["afl++"]
+
+
+def test_load_internal_catalog_linux_includes_uses_from_macos(tmp_path):
+    """Verify macOS-provided libraries become dependencies on Linux."""
+    path = tmp_path / "packages.x86_64_linux.jws.json"
+    _write_jws(path, INTERNAL_PAYLOAD)
+
+    formulae = homebrew._load_internal_catalog(path, "x86_64_linux")["formulae"]
+    wget = next(f for f in formulae if f["name"] == "wget")
+    assert wget["dependencies"] == ["openssl@4", "zlib"]
+
+
+def test_load_internal_catalog_casks(tmp_path):
+    """Verify casks keep their token and formula dependencies."""
+    path = tmp_path / "packages.arm64_tahoe.jws.json"
+    _write_jws(path, INTERNAL_PAYLOAD)
+
+    casks = homebrew._load_internal_catalog(path, "arm64_tahoe")["casks"]
+    assert casks == [
+        {"token": "brave-browser", "name": ["Brave"], "depends_on": {}},
+        {
+            "token": "azure-cli",
+            "name": ["Azure CLI"],
+            "depends_on": {"formula": ["python@3.14"]},
+        },
+    ]
+
+
+def test_load_internal_catalog_malformed(tmp_path):
+    """Verify an unparseable internal cache raises a pipeline error."""
+    path = tmp_path / "packages.arm64_tahoe.jws.json"
+    _write_jws(path, ["not", "a", "dict"])
+
+    with pytest.raises(RuntimeError, match="Failed to parse"):
+        homebrew._load_internal_catalog(path, "arm64_tahoe")
+
+
+def test_get_theoretical_catalog_prefers_internal(tmp_path):
+    """Verify the Homebrew 7 file wins over legacy caches."""
+    _write_jws(
+        tmp_path / "internal" / "packages.arm64_tahoe.jws.json", INTERNAL_PAYLOAD
+    )
+    _write_jws(tmp_path / "formula.jws.json", [{"name": "legacy"}])
+
+    catalog = homebrew.get_theoretical_catalog(tmp_path, tag="arm64_tahoe")
+    assert {f["name"] for f in catalog["formulae"]} == {"wget", "python@3.14", "afl++"}
+
+
+def test_get_theoretical_catalog_falls_back_to_legacy(tmp_path):
+    """Verify legacy caches are used when no internal file matches."""
+    _write_jws(tmp_path / "internal" / "packages.sequoia.jws.json", INTERNAL_PAYLOAD)
+    _write_jws(tmp_path / "formula.jws.json", [{"name": "legacy"}])
+
+    catalog = homebrew.get_theoretical_catalog(tmp_path, tag="arm64_tahoe")
+    assert catalog == {"formulae": [{"name": "legacy"}], "casks": []}
+
+
+def test_get_theoretical_catalog_wrong_tag(tmp_path):
+    """Verify a mismatched --arch lists which tags are cached."""
+    _write_jws(
+        tmp_path / "internal" / "packages.arm64_tahoe.jws.json", INTERNAL_PAYLOAD
+    )
+
+    with pytest.raises(RuntimeError, match=r"x86_64_linux.*available: arm64_tahoe"):
+        homebrew.get_theoretical_catalog(tmp_path, tag="x86_64_linux")
+
+
+def test_get_theoretical_catalog_detects_tag(tmp_path, mocker):
+    """Verify the catalog defaults to this machine's bottle tag."""
+    mocker.patch(
+        "dark_matter_cli.homebrew.detect_bottle_tag", return_value="arm64_tahoe"
+    )
+    _write_jws(
+        tmp_path / "internal" / "packages.arm64_tahoe.jws.json", INTERNAL_PAYLOAD
+    )
+
+    assert len(homebrew.get_theoretical_catalog(tmp_path)["casks"]) == 2
+
+
+@pytest.mark.parametrize("content", ["{not json", json.dumps({"payload": 5})])
+def test_read_jws_payload_malformed(tmp_path, content):
+    """Verify malformed JWS files are reported as None."""
+    path = tmp_path / "x.jws.json"
+    path.write_text(content)
+    assert homebrew._read_jws_payload(path) is None
+
+
+def test_load_api_cache_plain_json(tmp_path):
+    """Verify the legacy non-JWS cache is read, and non-lists rejected."""
+    json_file = tmp_path / "formula.json"
+    json_file.write_text(json.dumps([{"name": "wget"}]))
+    assert homebrew._load_api_cache(json_file, tmp_path / "missing") == [
+        {"name": "wget"}
+    ]
+
+    json_file.write_text(json.dumps({"name": "wget"}))
+    assert homebrew._load_api_cache(json_file, tmp_path / "missing") == []

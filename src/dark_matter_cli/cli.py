@@ -70,7 +70,10 @@ def handle_pipeline_errors(active_console: Console = console) -> Iterator[None]:
 
 
 def load_ecosystem_context(
-    source: ExportSource, active_console: Console, target_msg: str | None = None
+    source: ExportSource,
+    active_console: Console,
+    target_msg: str | None = None,
+    arch: str | None = None,
 ) -> tuple[Path, dict[str, Any], bool]:
     """Resolve the prefix and ingest the metadata payload while managing UI state."""
     prefix = get_brew_prefix()
@@ -83,7 +86,7 @@ def load_ecosystem_context(
     else:
         msg = target_msg or "[yellow]Computing theoretical ecosystem DAG...[/yellow]"
         with active_console.status(msg):
-            metadata = get_theoretical_catalog()
+            metadata = get_theoretical_catalog(tag=arch)
 
     return prefix, metadata, is_theoretical
 
@@ -156,7 +159,9 @@ def leaderboard(
     console.print("[bold cyan]Accessing local ecosystem cache...[/bold cyan]")
 
     with handle_pipeline_errors():
-        _, metadata, _ = load_ecosystem_context(ExportSource.catalog, console)
+        _, metadata, _ = load_ecosystem_context(
+            ExportSource.catalog, console, arch=arch
+        )
 
         with console.status("[yellow]Processing massive theoretical DAG...[/yellow]"):
             df = build_theoretical_dataframe(metadata, arch=arch)
@@ -180,6 +185,7 @@ def inspect(
             source,
             console,
             target_msg=f"[yellow]Resolving data for {package}...[/yellow]",
+            arch=arch,
         )
 
         if is_theoretical:
@@ -214,7 +220,10 @@ def compare(
 
     with handle_pipeline_errors():
         prefix, metadata, is_theoretical = load_ecosystem_context(
-            source, console, target_msg="[yellow]Resolving data for targets...[/yellow]"
+            source,
+            console,
+            target_msg="[yellow]Resolving data for targets...[/yellow]",
+            arch=arch,
         )
 
         if is_theoretical:
@@ -244,7 +253,9 @@ def export(
     err_console = Console(stderr=True)
 
     with handle_pipeline_errors(err_console):
-        prefix, metadata, is_theoretical = load_ecosystem_context(source, err_console)
+        prefix, metadata, is_theoretical = load_ecosystem_context(
+            source, err_console, arch=arch
+        )
 
         with err_console.status(
             "[yellow]Computing fractional attribution DAG...[/yellow]"
@@ -277,6 +288,7 @@ def explain(
             source,
             console,
             target_msg=f"[yellow]Resolving data for {package}...[/yellow]",
+            arch=arch,
         )
 
         try:
@@ -305,6 +317,7 @@ def explain(
                     ExportSource.catalog,
                     console,
                     target_msg="[yellow]Loading theoretical catalog...[/yellow]",
+                    arch=arch,
                 )
 
                 df = build_explain_theoretical_dataframe(
