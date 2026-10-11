@@ -141,15 +141,99 @@ def get_directory_size(path: Path) -> int:
     try:
         with os.scandir(path) as it:
             for entry in it:
-                if entry.is_file(follow_symlinks=False):
-                    total_size += entry.stat().st_size
-                elif entry.is_dir(follow_symlinks=False):
-                    total_size += get_directory_size(Path(entry.path))
-    except PermissionError:
+                # Skip individual unreadable or vanishing entries without
+                # discarding the rest of the directory.
+                try:
+                    if entry.is_file(follow_symlinks=False):
+                        total_size += entry.stat(follow_symlinks=False).st_size
+                    elif entry.is_dir(follow_symlinks=False):
+                        total_size += get_directory_size(Path(entry.path))
+                except OSError:
+                    continue
+    except OSError:
         # Silently ignore unreadable directories to prevent pipeline termination
         pass
 
     return total_size
+
+
+def get_path_size(path: Path) -> int:
+    """Calculate the physical byte size of a file or directory.
+
+    Symlinks count as 0: cask `binary` and completion artifacts are links into
+    the app bundle or Caskroom, which are measured separately.
+
+    Args:
+        path: The file or directory to measure.
+
+    Returns:
+        int: The total size in bytes, or 0 if it is missing or a symlink.
+    """
+    if path.is_symlink():
+        return 0
+    if path.is_dir():
+        return get_directory_size(path)
+    try:
+        return path.stat().st_size if path.is_file() else 0
+    except OSError:
+        return 0
+
+
+# Where casks install apps when Homebrew does not report a resolved target.
+_DEFAULT_APPDIR = Path("/Applications")
+_APP_ARTIFACT_KINDS = ("app", "suite")
+
+
+def _cask_artifact_paths(cask: dict[str, Any]) -> list[Path]:
+    """List the on-disk locations a cask's artifacts were installed to.
+
+    Homebrew 7+ reports a resolved `target` for each installed artifact. Older
+    releases do not, so app bundles are assumed to live in /Applications
+    (honoring a per-artifact `target` override). Artifacts installed by `pkg`
+    installers have no recorded location and cannot be measured.
+
+    Args:
+        cask: A cask entry from `brew info --json=v2 --installed`.
+
+    Returns:
+        list[Path]: Unique artifact paths, in declaration order.
+    """
+    paths: list[Path] = []
+    for artifact in cask.get("artifacts", []):
+        if not isinstance(artifact, dict):
+            continue
+
+        target = artifact.get("target")
+        if isinstance(target, str):
+            paths.append(Path(target).expanduser())
+            continue
+
+        for kind in _APP_ARTIFACT_KINDS:
+            spec = artifact.get(kind)
+            if not spec or not isinstance(spec[0], str):
+                continue
+            options = spec[1] if len(spec) > 1 and isinstance(spec[1], dict) else {}
+            name = options.get("target", Path(spec[0]).name)
+            paths.append(_DEFAULT_APPDIR / Path(name).expanduser())
+
+    return list(dict.fromkeys(paths))
+
+
+def get_cask_size(cask: dict[str, Any], prefix: Path) -> int:
+    """Calculate the installed footprint of a cask.
+
+    The Caskroom only holds staging metadata; the bulk of a cask lives in its
+    installed artifacts (e.g. /Applications/Foo.app, ~/Library/Fonts/*.otf).
+
+    Args:
+        cask: A cask entry from `brew info --json=v2 --installed`.
+        prefix: The Homebrew installation prefix.
+
+    Returns:
+        int: The Caskroom size plus the size of every installed artifact.
+    """
+    total = get_directory_size(prefix / "Caskroom" / cask["token"])
+    return total + sum(get_path_size(path) for path in _cask_artifact_paths(cask))
 
 
 def _read_jws_payload(jws_path: Path) -> Any:

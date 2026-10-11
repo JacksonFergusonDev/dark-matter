@@ -10,15 +10,24 @@ def _build_global_topology(
     metadata: dict[str, Any],
 ) -> tuple[dict[str, list[str]], dict[str, set[str]], dict[str, int], dict[str, Any]]:
     """Parse metadata and pre-compute the immutable DAG properties."""
-    packages = metadata.get("formulae", []) + metadata.get("casks", [])
+    dependency_graph: dict[str, list[str]] = {}
+    pkg_data_map: dict[str, Any] = {}
 
-    dependency_graph = {}
-    pkg_data_map = {}
+    for formula in metadata.get("formulae", []):
+        name = formula["name"]
+        dependency_graph[name] = list(formula.get("dependencies", []))
+        pkg_data_map[name] = formula
 
-    for pkg in packages:
-        name = pkg["name"][0] if isinstance(pkg["name"], list) else pkg["name"]
-        dependency_graph[name] = pkg.get("dependencies", [])
-        pkg_data_map[name] = pkg
+    for cask in metadata.get("casks", []):
+        token = cask["token"]
+        # Formulae and casks share a namespace in the graph; disambiguate
+        # collisions (e.g. the `docker` formula vs. the `docker` cask).
+        key = f"{token} (cask)" if token in dependency_graph else token
+        depends_on = cask.get("depends_on", {})
+        dependency_graph[key] = list(depends_on.get("formula", [])) + list(
+            depends_on.get("cask", [])
+        )
+        pkg_data_map[key] = cask
 
     package_transitive_deps = {
         pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
@@ -39,20 +48,15 @@ def _build_global_topology(
 
 
 def _resolve_physical_sizes(
-    dependency_graph: dict[str, list[str]], prefix: Path
+    pkg_data_map: dict[str, Any], prefix: Path
 ) -> dict[str, int]:
     """Calculate disk footprint for installed packages."""
     size_map = {}
-    for name in dependency_graph:
-        cellar_path = prefix / "Cellar" / name
-        cask_path = prefix / "Caskroom" / name
-
-        if cellar_path.exists():
-            size_map[name] = homebrew.get_directory_size(cellar_path)
-        elif cask_path.exists():
-            size_map[name] = homebrew.get_directory_size(cask_path)
+    for name, pkg in pkg_data_map.items():
+        if "token" in pkg:
+            size_map[name] = homebrew.get_cask_size(pkg, prefix)
         else:
-            size_map[name] = 0
+            size_map[name] = homebrew.get_directory_size(prefix / "Cellar" / name)
     return size_map
 
 
@@ -206,8 +210,8 @@ def get_all_dependencies(
 
 def build_analysis_dataframe(metadata: dict[str, Any], prefix: Path) -> pd.DataFrame:
     """Construct the primary DataFrame utilizing physical disk metrics."""
-    graph, trans_deps, in_degrees, _ = _build_global_topology(metadata)
-    size_map = _resolve_physical_sizes(graph, prefix)
+    graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
+    size_map = _resolve_physical_sizes(pkg_map, prefix)
     targets = list(graph.keys())
 
     return _compute_bloat_metrics(targets, size_map, trans_deps, in_degrees)
@@ -217,12 +221,12 @@ def build_targeted_analysis_dataframe(
     metadata: dict[str, Any], prefix: Path, target: str
 ) -> pd.DataFrame:
     """Constructs a DataFrame for a single installed target."""
-    graph, trans_deps, in_degrees, _ = _build_global_topology(metadata)
+    graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
     if target not in graph:
         raise ValueError(f"Package '{target}' not found in the local installation.")
 
-    size_map = _resolve_physical_sizes(graph, prefix)
+    size_map = _resolve_physical_sizes(pkg_map, prefix)
     return _compute_bloat_metrics([target], size_map, trans_deps, in_degrees)
 
 
@@ -230,7 +234,7 @@ def build_compare_analysis_dataframe(
     metadata: dict[str, Any], prefix: Path, targets: list[str]
 ) -> pd.DataFrame:
     """Constructs a DataFrame for comparing multiple installed targets."""
-    graph, trans_deps, in_degrees, _ = _build_global_topology(metadata)
+    graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
     valid_targets = [t for t in targets if t in graph]
     if not valid_targets:
@@ -238,7 +242,7 @@ def build_compare_analysis_dataframe(
             "None of the specified packages were found in the local installation."
         )
 
-    size_map = _resolve_physical_sizes(graph, prefix)
+    size_map = _resolve_physical_sizes(pkg_map, prefix)
     return _compute_bloat_metrics(valid_targets, size_map, trans_deps, in_degrees)
 
 
@@ -246,12 +250,12 @@ def build_explain_analysis_dataframe(
     metadata: dict[str, Any], prefix: Path, target: str
 ) -> pd.DataFrame:
     """Constructs a dependency breakdown DataFrame for a physical target."""
-    graph, trans_deps, in_degrees, _ = _build_global_topology(metadata)
+    graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
     if target not in graph:
         raise ValueError(f"Package '{target}' not found in the local installation.")
 
-    size_map = _resolve_physical_sizes(graph, prefix)
+    size_map = _resolve_physical_sizes(pkg_map, prefix)
     return _compute_explain_metrics(
         target, size_map, trans_deps, in_degrees, is_theoretical=False
     )
