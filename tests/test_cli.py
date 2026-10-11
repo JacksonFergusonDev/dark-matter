@@ -259,3 +259,21 @@ def test_catalog_source_passes_arch(mocker, mock_brew_metadata):
     )
     assert result.exit_code == 0
     catalog.assert_called_once_with(tag="x86_64_linux")
+
+
+def test_export_catalog_csv(mocker, mock_brew_metadata):
+    """Verify catalog export builds the theoretical frame and writes CSV."""
+    import pandas as pd
+
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_theoretical_catalog", return_value=mock_brew_metadata
+    )
+    mocker.patch(
+        "dark_matter_cli.cli.build_theoretical_dataframe",
+        return_value=pd.DataFrame([{"Package": "pkg-a", "Bloat_Ratio": 2.0}]),
+    )
+
+    result = runner.invoke(app, ["export", "--source", "catalog"])
+    assert result.exit_code == 0
+    assert result.stdout.splitlines() == ["Package,Bloat_Ratio", "pkg-a,2.0"]

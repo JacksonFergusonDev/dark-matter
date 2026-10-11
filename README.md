@@ -31,7 +31,7 @@ Dark Matter reconstructs the dependency graph Homebrew already knows about and u
 
 ## How it works
 
-Dark Matter parses Homebrew's own JSON metadata (via `brew info --json=v2` or its local API cache), rebuilds the dependency DAG, and walks it to compute two figures per package:
+Dark Matter parses Homebrew's own JSON metadata (via `brew info --json=v2` or its local API cache, including Homebrew 7's per-platform format), rebuilds the dependency DAG, and walks it to compute two figures per package:
 
 - **Core size** — the package's own on-disk footprint (or, in theoretical mode, its compressed bottle archive).
 - **Weighted recursive size** — the core size plus a *fair share* of every transitive dependency, where each shared dependency's cost is divided evenly across all the packages that depend on it.
@@ -41,14 +41,14 @@ The ratio between the two — the **Bloat Ratio** — is the headline number. A 
 ## Features
 
 - **Comprehensive analysis suite**
-  - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts.
+  - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts. Casks are measured where they are installed (e.g. `/Applications/Foo.app`), not just their `Caskroom` staging directory.
   - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula and cask catalog from the local API cache, without requiring anything to be installed.
-  - `inspect` & `compare` — targeted O(1) theoretical resolution for individual or grouped packages without resolving the entire ecosystem payload.
+  - `inspect` & `compare` — targeted analysis of individual or grouped packages. In theoretical mode, only the targets' dependency closure is resolved over the network rather than the entire catalog.
   - `explain` — breaks down a target package's bloat by attributing fractional byte costs to each of its transitive dependencies.
   - `export` — streams the underlying DataFrames to CSV or JSON for integration into external data pipelines.
 - **Fractional Attribution Model** — shared dependencies (`openssl`, `python`, etc.) are divided proportionally across all parent packages instead of being double-counted, giving an honest per-package cost.
 - **Daemon-free** — no background indexing, no persistent database. Every run is a fresh, on-demand computation.
-- **Typed and tested** — fully type-annotated (strict `mypy`), linted with `ruff`, and covered by a `pytest` suite exercising the DAG traversal, fractional math, and network resolution logic. CI runs the full suite on macOS and Ubuntu across Python 3.12 and 3.14.
+- **Typed and tested** — fully type-annotated (strict `mypy`), linted with `ruff`, and covered by a `pytest` suite exercising the DAG traversal, fractional math, and network resolution logic. CI runs the full suite on macOS and Ubuntu across Python 3.12–3.14 and enforces a coverage floor.
 
 ## A note on theoretical measurements
 
@@ -61,6 +61,20 @@ $$R \approx \frac{c \cdot m_{recursive}}{c \cdot m_{core}} \approx \frac{m_{recu
 So while theoretical modes shouldn't be read as precise disk-space forecasts, they are a reliable way to evaluate relative bloat without installing anything.
 
 ## Installation
+
+With [Homebrew](https://brew.sh):
+
+```bash
+brew install jacksonfergusondev/tap/dark-matter
+```
+
+Or from [PyPI](https://pypi.org/project/dark-matter-cli/) with [`uv`](https://docs.astral.sh/uv/):
+
+```bash
+uv tool install dark-matter-cli
+```
+
+For development:
 
 ```bash
 git clone https://github.com/jacksonfergusondev/dark-matter.git
@@ -90,14 +104,18 @@ dark-matter compare uv poetry pdm
 dark-matter export --format json > homebrew_bloat.json
 ```
 
-All commands accept the global `--verbose` / `-v` flag for debug logging, and `--version` to print the installed version.
+All commands accept the global `--verbose` / `-v` flag for debug logging (written to stderr), and `--version` to print the installed version.
+
+When `inspect`, `compare`, or `explain` are pointed at packages that aren't installed, Dark Matter offers to fall back to the theoretical catalog.
+
+Theoretical modes read the catalog Homebrew caches for the current platform, so run `brew update` first if it's missing. `--arch` defaults to this machine's bottle tag (e.g. `arm64_tahoe`, `x86_64_linux`).
 
 ### `analyze`
 
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--sort` / `-s` | `ratio` | Sort by `ratio`, `core`, or `recursive` |
-| `--top` / `-n` | `20` | Number of packages to display |
+| `--top` / `-n` | `20` | Number of packages to display (at least 1) |
 | `--fractional` / `--standard` | `--fractional` | Toggle the Fractional Attribution Model |
 
 ### `leaderboard`
@@ -105,8 +123,8 @@ All commands accept the global `--verbose` / `-v` flag for debug logging, and `-
 | Flag | Default | Description |
 | --- | --- | --- |
 | `--sort` / `-s` | `ratio` | Sort by `ratio`, `core`, or `recursive` |
-| `--top` / `-n` | `20` | Number of packages to display |
-| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
+| `--top` / `-n` | `20` | Number of packages to display (at least 1) |
+| `--arch` / `-a` | detected | Target bottle tag |
 
 ### `inspect`
 
@@ -114,7 +132,7 @@ All commands accept the global `--verbose` / `-v` flag for debug logging, and `-
 | --- | --- | --- |
 | `[PACKAGE]` | **Required** | The target package to analyze |
 | `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
-| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
+| `--arch` / `-a` | detected | Target bottle tag |
 
 ### `compare`
 
@@ -122,8 +140,8 @@ All commands accept the global `--verbose` / `-v` flag for debug logging, and `-
 | --- | --- | --- |
 | `[PACKAGES]...` | **Required** | A space-separated list of packages to compare |
 | `--sort` / `-s` | `ratio` | Sort by `ratio`, `core`, or `recursive` |
-| `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
-| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
+| `--source` | `installed` | Data source to compute: `installed` or `catalog` |
+| `--arch` / `-a` | detected | Target bottle tag |
 
 ### `explain`
 
@@ -131,7 +149,7 @@ All commands accept the global `--verbose` / `-v` flag for debug logging, and `-
 | --- | --- | --- |
 | `[PACKAGE]` | **Required** | The specific package to analyze |
 | `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
-| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture |
+| `--arch` / `-a` | detected | Target bottle tag |
 
 ### `export`
 
@@ -139,7 +157,7 @@ All commands accept the global `--verbose` / `-v` flag for debug logging, and `-
 | --- | --- | --- |
 | `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
 | `--format` / `-f` | `csv` | Output format: `csv` or `json` |
-| `--arch` / `-a` | `arm64_tahoe` | Target bottle architecture (for `catalog` source) |
+| `--arch` / `-a` | detected | Target bottle tag (for `catalog` source) |
 
 ## Development
 
