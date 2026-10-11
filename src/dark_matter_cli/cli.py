@@ -40,6 +40,14 @@ class ExportFormat(StrEnum):
     json = "json"
 
 
+class SortKey(StrEnum):
+    """Supported sorting metrics for bloat tables."""
+
+    ratio = "ratio"
+    core = "core"
+    recursive = "recursive"
+
+
 class ExportSource(StrEnum):
     """Supported theoretical or physical data sources for the export command."""
 
@@ -102,8 +110,12 @@ def main(
 
 @app.command()
 def analyze(
-    sort_by: str = typer.Option("ratio", "--sort", "-s", help="Sorting metric."),
-    top_n: int = typer.Option(20, "--top", "-n", help="Number of packages to display."),
+    sort_by: SortKey = typer.Option(
+        SortKey.ratio, "--sort", "-s", help="Sorting metric."
+    ),
+    top_n: int = typer.Option(
+        20, "--top", "-n", min=1, help="Number of packages to display."
+    ),
     fractional: bool = typer.Option(True, "--fractional/--standard"),
 ) -> None:
     """Execute the storage bloat analysis pipeline."""
@@ -128,8 +140,12 @@ def analyze(
 
 @app.command()
 def leaderboard(
-    sort_by: str = typer.Option("ratio", "--sort", "-s", help="Sorting metric."),
-    top_n: int = typer.Option(20, "--top", "-n", help="Number of packages to display."),
+    sort_by: SortKey = typer.Option(
+        SortKey.ratio, "--sort", "-s", help="Sorting metric."
+    ),
+    top_n: int = typer.Option(
+        20, "--top", "-n", min=1, help="Number of packages to display."
+    ),
     arch: str = typer.Option(
         "arm64_tahoe", "--arch", "-a", help="Target architecture."
     ),
@@ -179,8 +195,10 @@ def inspect(
 @app.command()
 def compare(
     packages: list[str] = typer.Argument(..., help="The specific packages to compare."),
-    sort_by: str = typer.Option("ratio", "--sort", "-s"),
-    source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
+    sort_by: SortKey = typer.Option(
+        SortKey.ratio, "--sort", "-s", help="Sorting metric."
+    ),
+    source: ExportSource = typer.Option(ExportSource.installed, "--source"),
     arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
 ) -> None:
     """Evaluate and compare the bloat of multiple packages."""

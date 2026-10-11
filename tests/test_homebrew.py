@@ -108,3 +108,11 @@ def test_load_api_cache_corrupt_payload(tmp_path):
 
     jws_file.write_text(json.dumps({"payload": "{corrupt-json"}), encoding="utf-8")
     assert homebrew._load_api_cache(json_file, jws_file) == []
+
+
+def test_get_brew_metadata_missing_executable(mocker):
+    """Verify a missing brew executable raises a RuntimeError, not FileNotFoundError."""
+    mocker.patch("subprocess.run", side_effect=FileNotFoundError("brew"))
+
+    with pytest.raises(RuntimeError, match="not found on PATH"):
+        homebrew.get_brew_metadata()

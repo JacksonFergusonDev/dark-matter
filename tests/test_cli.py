@@ -121,3 +121,38 @@ def test_explain_command_with_theoretical_fallback(mocker, mock_brew_metadata):
     )
     assert result.exit_code == 0
     assert "Fall back to the theoretical catalog?" in result.stdout
+
+
+def test_compare_short_sort_flag(mocker, mock_brew_metadata):
+    """Verify -s maps to --sort (not --source) on compare."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
+    )
+    mocker.patch("dark_matter_cli.cli.build_compare_analysis_dataframe")
+    render = mocker.patch("dark_matter_cli.display.render_bloat_table")
+
+    result = runner.invoke(app, ["compare", "pkg-a", "pkg-b", "-s", "core"])
+    assert result.exit_code == 0
+    assert render.call_args.kwargs["sort_by"] == "core"
+
+
+def test_invalid_sort_key_rejected():
+    """Verify unknown sort metrics fail fast instead of silently falling back."""
+    result = runner.invoke(app, ["analyze", "--sort", "ratoi"])
+    assert result.exit_code == 2
+
+
+def test_non_positive_top_rejected():
+    """Verify --top rejects values below 1."""
+    result = runner.invoke(app, ["analyze", "--top", "0"])
+    assert result.exit_code == 2
+
+
+def test_missing_brew_reports_pipeline_error(mocker):
+    """Verify a missing brew executable surfaces as a clean pipeline error."""
+    mocker.patch("subprocess.run", side_effect=FileNotFoundError("brew"))
+
+    result = runner.invoke(app, ["analyze"])
+    assert result.exit_code == 1
+    assert "not found on PATH" in result.stdout

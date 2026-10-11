@@ -11,6 +11,8 @@ import requests
 
 logger = logging.getLogger("dark_matter_cli")
 
+_BREW_NOT_FOUND = "Homebrew (`brew`) was not found on PATH. Is Homebrew installed?"
+
 
 def get_brew_prefix() -> Path:
     """Retrieve the local Homebrew installation prefix.
@@ -29,6 +31,8 @@ def get_brew_prefix() -> Path:
             check=True,
         )
         return Path(result.stdout.strip())
+    except FileNotFoundError as e:
+        raise RuntimeError(_BREW_NOT_FOUND) from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to resolve Homebrew prefix: {e.stderr}") from e
 
@@ -51,6 +55,8 @@ def get_brew_metadata() -> dict[str, Any]:
         )
         data: dict[str, Any] = json.loads(result.stdout)
         return data
+    except FileNotFoundError as e:
+        raise RuntimeError(_BREW_NOT_FOUND) from e
     except subprocess.CalledProcessError as e:
         raise RuntimeError(f"Failed to execute brew API: {e.stderr}") from e
     except json.JSONDecodeError as e:
