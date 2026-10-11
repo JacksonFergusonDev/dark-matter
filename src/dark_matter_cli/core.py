@@ -56,17 +56,37 @@ def _resolve_physical_sizes(
     return size_map
 
 
+def _select_bottle_file(files: dict[str, Any], tag: str) -> Any:
+    """Pick the bottle matching `tag`, falling back like Homebrew would.
+
+    Preference order: the exact tag, an arch-independent 'all' bottle, then
+    the newest bottle for the same CPU and OS family. Bottles for a different
+    CPU or OS are never substituted.
+    """
+    if tag in files:
+        return files[tag]
+    if "all" in files:
+        return files["all"]
+
+    def family(t: str) -> tuple[bool, bool]:
+        return (t.startswith("arm64_"), t.endswith("_linux"))
+
+    # Homebrew lists bottles newest-first.
+    return next((v for k, v in files.items() if family(k) == family(tag)), None)
+
+
 def _resolve_theoretical_sizes(
-    resolution_set: set[str], pkg_data_map: dict[str, Any], arch: str
+    resolution_set: set[str], pkg_data_map: dict[str, Any], arch: str | None
 ) -> dict[str, int]:
     """Resolve compressed bottle sizes via ghcr.io for a specific subset of packages."""
+    tag = arch or homebrew.detect_bottle_tag()
     package_digest = {}
     bottles = {}
 
     for name in resolution_set:
         pkg = pkg_data_map.get(name, {})
         files = pkg.get("bottle", {}).get("stable", {}).get("files", {})
-        file_info = files.get(arch) or next(iter(files.values()), None)
+        file_info = _select_bottle_file(files, tag)
 
         if file_info is not None:
             digest = file_info.get("sha256", "")
@@ -238,7 +258,7 @@ def build_explain_analysis_dataframe(
 
 
 def build_theoretical_dataframe(
-    metadata: dict[str, Any], arch: str = "arm64_tahoe"
+    metadata: dict[str, Any], arch: str | None = None
 ) -> pd.DataFrame:
     """Constructs the ecosystem-wide theoretical leaderboard."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
@@ -251,7 +271,7 @@ def build_theoretical_dataframe(
 
 
 def build_targeted_theoretical_dataframe(
-    metadata: dict[str, Any], target: str, arch: str = "arm64_tahoe"
+    metadata: dict[str, Any], target: str, arch: str | None = None
 ) -> pd.DataFrame:
     """Constructs a DataFrame for a single target, minimizing network resolution."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
@@ -267,7 +287,7 @@ def build_targeted_theoretical_dataframe(
 
 
 def build_compare_theoretical_dataframe(
-    metadata: dict[str, Any], targets: list[str], arch: str = "arm64_tahoe"
+    metadata: dict[str, Any], targets: list[str], arch: str | None = None
 ) -> pd.DataFrame:
     """Constructs a DataFrame for multiple targets by resolving their unioned closure."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
@@ -286,7 +306,7 @@ def build_compare_theoretical_dataframe(
 
 
 def build_explain_theoretical_dataframe(
-    metadata: dict[str, Any], target: str, arch: str = "arm64_tahoe"
+    metadata: dict[str, Any], target: str, arch: str | None = None
 ) -> pd.DataFrame:
     """Constructs a dependency breakdown DataFrame using theoretical metrics."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)

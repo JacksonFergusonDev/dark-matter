@@ -161,3 +161,46 @@ def test_compare_keeps_accurate_leaf_flags(mocker, mock_brew_metadata):
         mock_brew_metadata, Path("/mock"), "pkg-d"
     )
     assert not single.iloc[0]["Is_Leaf"]
+
+
+@pytest.mark.parametrize(
+    ("files", "tag", "expected"),
+    [
+        ({"arm64_tahoe": "exact", "all": "any"}, "arm64_tahoe", "exact"),
+        ({"all": "any", "arm64_sequoia": "older"}, "arm64_tahoe", "any"),
+        ({"sequoia": "intel", "arm64_sequoia": "older"}, "arm64_tahoe", "older"),
+        ({"x86_64_linux": "linux"}, "arm64_tahoe", None),
+        ({"arm64_sequoia": "mac-arm"}, "sequoia", None),
+        (
+            {"arm64_linux": "linux-arm", "x86_64_linux": "linux"},
+            "x86_64_linux",
+            "linux",
+        ),
+    ],
+)
+def test_select_bottle_file(files, tag, expected):
+    """Verify bottle fallback never crosses CPU or OS families."""
+    assert core._select_bottle_file(files, tag) == expected
+
+
+def test_theoretical_defaults_to_detected_tag(mocker, mock_brew_metadata):
+    """Verify an omitted arch resolves via bottle tag detection."""
+    mocker.patch(
+        "dark_matter_cli.homebrew.detect_bottle_tag", return_value="x86_64_linux"
+    )
+    resolve = mocker.patch(
+        "dark_matter_cli.homebrew.resolve_bottle_sizes", return_value={}
+    )
+    mocker.patch("dark_matter_cli.homebrew.load_bottle_size_cache", return_value={})
+    mocker.patch("dark_matter_cli.homebrew.save_bottle_size_cache")
+    mock_brew_metadata["formulae"][0]["bottle"] = {
+        "stable": {
+            "files": {
+                "arm64_tahoe": {"sha256": "mac", "url": "u-mac"},
+                "x86_64_linux": {"sha256": "linux", "url": "u-linux"},
+            }
+        }
+    }
+
+    core.build_targeted_theoretical_dataframe(mock_brew_metadata, "pkg-a")
+    assert resolve.call_args.args[0] == {"linux": "u-linux"}
