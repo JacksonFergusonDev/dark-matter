@@ -8,6 +8,7 @@ with contextlib.suppress(importlib.metadata.PackageNotFoundError):
     __version__ = importlib.metadata.version("dark-matter-cli")
 
 from .core import (
+    PackageNotFoundError,
     build_analysis_dataframe,
     build_compare_analysis_dataframe,
     build_compare_theoretical_dataframe,
@@ -20,6 +21,7 @@ from .core import (
 from .homebrew import get_brew_metadata, get_brew_prefix, get_theoretical_catalog
 
 __all__ = [
+    "PackageNotFoundError",
     "__version__",
     "build_analysis_dataframe",
     "build_compare_analysis_dataframe",

@@ -1,14 +1,16 @@
 import contextlib
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import pandas as pd
 import typer
 from rich.console import Console
 
 from dark_matter_cli import (
+    PackageNotFoundError,
     __version__,
     build_analysis_dataframe,
     build_compare_analysis_dataframe,
@@ -23,14 +25,13 @@ from dark_matter_cli import (
     get_brew_prefix,
     get_theoretical_catalog,
 )
+from dark_matter_cli.logger import get_logger
 
 app = typer.Typer(
     help="Analyze dependency bloat and storage mass of macOS Homebrew installations.",
     add_completion=False,
 )
 console = Console()
-
-state = {"verbose": False}
 
 ARCH_HELP = (
     "Target bottle tag (e.g. arm64_tahoe, x86_64_linux). Defaults to this machine's."
@@ -91,6 +92,57 @@ def load_ecosystem_context(
     return prefix, metadata, is_theoretical
 
 
+InstalledBuilder = Callable[[dict[str, Any], Path, list[str]], pd.DataFrame]
+CatalogBuilder = Callable[[dict[str, Any], list[str]], pd.DataFrame]
+
+
+def build_with_catalog_fallback(
+    packages: list[str],
+    source: ExportSource,
+    arch: str | None,
+    build_installed: InstalledBuilder,
+    build_catalog: CatalogBuilder,
+) -> tuple[pd.DataFrame, bool]:
+    """Build a targeted DataFrame, offering the catalog for uninstalled packages.
+
+    When analyzing the local installation and some packages are missing, the
+    user may switch the whole run to the theoretical catalog. Declining keeps
+    the installed subset, or exits if none of the packages are installed.
+
+    Returns:
+        tuple[pd.DataFrame, bool]: The DataFrame and whether it is theoretical.
+    """
+    status = "[yellow]Resolving data for targets...[/yellow]"
+    prefix, metadata, is_theoretical = load_ecosystem_context(
+        source, console, target_msg=status, arch=arch
+    )
+    if is_theoretical:
+        return build_catalog(metadata, packages), True
+
+    try:
+        return build_installed(metadata, prefix, packages), False
+    except PackageNotFoundError as e:
+        names = ", ".join(f"'{p}'" for p in e.packages)
+        verb = "is" if len(e.packages) == 1 else "are"
+        use_catalog = typer.confirm(
+            f"\n{names} {verb} not installed. Fall back to the theoretical catalog?",
+            default=True,
+        )
+        if not use_catalog:
+            installed = [p for p in packages if p not in e.packages]
+            if not installed:
+                raise typer.Exit(code=1) from None
+            return build_installed(metadata, prefix, installed), False
+
+    _, metadata, _ = load_ecosystem_context(
+        ExportSource.catalog,
+        console,
+        target_msg="[yellow]Loading theoretical catalog...[/yellow]",
+        arch=arch,
+    )
+    return build_catalog(metadata, packages), True
+
+
 def version_callback(value: bool) -> None:
     """Print the version and exit eagerly."""
     if value:
@@ -112,7 +164,7 @@ def main(
     ),
 ) -> None:
     """Configure global CLI state."""
-    state["verbose"] = verbose
+    get_logger("dark_matter_cli", verbose=verbose)
 
 
 @app.command()
@@ -181,19 +233,17 @@ def inspect(
     console.print(f"[bold cyan]Inspecting bloat for '{package}'...[/bold cyan]")
 
     with handle_pipeline_errors():
-        prefix, metadata, is_theoretical = load_ecosystem_context(
+        df, is_theoretical = build_with_catalog_fallback(
+            [package],
             source,
-            console,
-            target_msg=f"[yellow]Resolving data for {package}...[/yellow]",
-            arch=arch,
+            arch,
+            lambda metadata, prefix, targets: build_targeted_analysis_dataframe(
+                metadata, prefix, target=targets[0]
+            ),
+            lambda metadata, targets: build_targeted_theoretical_dataframe(
+                metadata, target=targets[0], arch=arch
+            ),
         )
-
-        if is_theoretical:
-            df = build_targeted_theoretical_dataframe(
-                metadata, target=package, arch=arch
-            )
-        else:
-            df = build_targeted_analysis_dataframe(metadata, prefix, target=package)
 
         display.render_bloat_table(
             df,
@@ -215,23 +265,22 @@ def compare(
     arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
 ) -> None:
     """Evaluate and compare the bloat of multiple packages."""
+    packages = list(dict.fromkeys(packages))
     pkg_list_str = ", ".join(packages)
     console.print(f"[bold cyan]Comparing bloat for: {pkg_list_str}[/bold cyan]")
 
     with handle_pipeline_errors():
-        prefix, metadata, is_theoretical = load_ecosystem_context(
+        df, is_theoretical = build_with_catalog_fallback(
+            packages,
             source,
-            console,
-            target_msg="[yellow]Resolving data for targets...[/yellow]",
-            arch=arch,
+            arch,
+            lambda metadata, prefix, targets: build_compare_analysis_dataframe(
+                metadata, prefix, targets=targets
+            ),
+            lambda metadata, targets: build_compare_theoretical_dataframe(
+                metadata, targets=targets, arch=arch
+            ),
         )
-
-        if is_theoretical:
-            df = build_compare_theoretical_dataframe(
-                metadata, targets=packages, arch=arch
-            )
-        else:
-            df = build_compare_analysis_dataframe(metadata, prefix, targets=packages)
 
         display.render_bloat_table(
             df,
@@ -284,48 +333,17 @@ def explain(
     )
 
     with handle_pipeline_errors():
-        prefix, metadata, is_theoretical = load_ecosystem_context(
+        df, is_theoretical = build_with_catalog_fallback(
+            [package],
             source,
-            console,
-            target_msg=f"[yellow]Resolving data for {package}...[/yellow]",
-            arch=arch,
+            arch,
+            lambda metadata, prefix, targets: build_explain_analysis_dataframe(
+                metadata, prefix, target=targets[0]
+            ),
+            lambda metadata, targets: build_explain_theoretical_dataframe(
+                metadata, target=targets[0], arch=arch
+            ),
         )
-
-        try:
-            if is_theoretical:
-                df = build_explain_theoretical_dataframe(
-                    metadata, target=package, arch=arch
-                )
-            else:
-                df = build_explain_analysis_dataframe(metadata, prefix, target=package)
-
-        except ValueError as e:
-            # Intercept the specific missing package error for physical installations
-            if not is_theoretical and "not found in the local installation" in str(e):
-                # Suspend the pipeline and prompt for state pivot
-                fallback = typer.confirm(
-                    f"\nPackage '{package}' is not installed. Fall back to the theoretical catalog?",
-                    default=True,
-                )
-
-                if not fallback:
-                    raise typer.Exit(code=1) from None
-
-                # Mutate state to theoretical and fetch the full catalog metadata
-                is_theoretical = True
-                _, metadata, _ = load_ecosystem_context(
-                    ExportSource.catalog,
-                    console,
-                    target_msg="[yellow]Loading theoretical catalog...[/yellow]",
-                    arch=arch,
-                )
-
-                df = build_explain_theoretical_dataframe(
-                    metadata, target=package, arch=arch
-                )
-            else:
-                # Bubble up unrelated ValueErrors to the context manager
-                raise
 
         display.render_explain_table(df, target=package, is_theoretical=is_theoretical)
 

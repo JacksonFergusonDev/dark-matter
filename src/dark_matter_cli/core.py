@@ -1,9 +1,40 @@
+import logging
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from dark_matter_cli import homebrew
+
+logger = logging.getLogger("dark_matter_cli")
+
+INSTALLED = "local installation"
+CATALOG = "catalog"
+
+
+class PackageNotFoundError(ValueError):
+    """Raised when requested packages are absent from the analyzed graph.
+
+    Attributes:
+        packages: The requested names that were not found.
+        location: Where they were looked up (INSTALLED or CATALOG).
+    """
+
+    def __init__(self, packages: list[str], location: str) -> None:
+        self.packages = packages
+        self.location = location
+        noun = "Package" if len(packages) == 1 else "Packages"
+        names = ", ".join(f"'{p}'" for p in packages)
+        super().__init__(f"{noun} {names} not found in the {location}.")
+
+
+def _require_targets(
+    targets: list[str], graph: dict[str, list[str]], location: str
+) -> None:
+    """Raise PackageNotFoundError listing every target missing from `graph`."""
+    missing = [t for t in targets if t not in graph]
+    if missing:
+        raise PackageNotFoundError(missing, location)
 
 
 def _build_global_topology(
@@ -28,6 +59,11 @@ def _build_global_topology(
             depends_on.get("cask", [])
         )
         pkg_data_map[key] = cask
+
+    logger.debug(
+        f"Dependency graph: {len(dependency_graph)} packages "
+        f"({len(metadata.get('casks', []))} casks)"
+    )
 
     package_transitive_deps = {
         pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
@@ -223,8 +259,7 @@ def build_targeted_analysis_dataframe(
     """Constructs a DataFrame for a single installed target."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
-    if target not in graph:
-        raise ValueError(f"Package '{target}' not found in the local installation.")
+    _require_targets([target], graph, INSTALLED)
 
     size_map = _resolve_physical_sizes(pkg_map, prefix)
     return _compute_bloat_metrics([target], size_map, trans_deps, in_degrees)
@@ -236,14 +271,10 @@ def build_compare_analysis_dataframe(
     """Constructs a DataFrame for comparing multiple installed targets."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
-    valid_targets = [t for t in targets if t in graph]
-    if not valid_targets:
-        raise ValueError(
-            "None of the specified packages were found in the local installation."
-        )
+    _require_targets(targets, graph, INSTALLED)
 
     size_map = _resolve_physical_sizes(pkg_map, prefix)
-    return _compute_bloat_metrics(valid_targets, size_map, trans_deps, in_degrees)
+    return _compute_bloat_metrics(targets, size_map, trans_deps, in_degrees)
 
 
 def build_explain_analysis_dataframe(
@@ -252,8 +283,7 @@ def build_explain_analysis_dataframe(
     """Constructs a dependency breakdown DataFrame for a physical target."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
-    if target not in graph:
-        raise ValueError(f"Package '{target}' not found in the local installation.")
+    _require_targets([target], graph, INSTALLED)
 
     size_map = _resolve_physical_sizes(pkg_map, prefix)
     return _compute_explain_metrics(
@@ -280,8 +310,7 @@ def build_targeted_theoretical_dataframe(
     """Constructs a DataFrame for a single target, minimizing network resolution."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
-    if target not in graph:
-        raise ValueError(f"Package '{target}' not found in the catalog.")
+    _require_targets([target], graph, CATALOG)
 
     # Isolate strictly to the target's closure to prevent O(N) network lookups
     resolution_set = {target} | trans_deps[target]
@@ -296,17 +325,15 @@ def build_compare_theoretical_dataframe(
     """Constructs a DataFrame for multiple targets by resolving their unioned closure."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
-    valid_targets = [t for t in targets if t in graph]
-    if not valid_targets:
-        raise ValueError("None of the specified packages were found in the catalog.")
+    _require_targets(targets, graph, CATALOG)
 
     # Generate the union of all target transitive dependencies
-    resolution_set = set(valid_targets)
-    for t in valid_targets:
+    resolution_set = set(targets)
+    for t in targets:
         resolution_set.update(trans_deps[t])
 
     size_map = _resolve_theoretical_sizes(resolution_set, pkg_map, arch)
-    return _compute_bloat_metrics(valid_targets, size_map, trans_deps, in_degrees)
+    return _compute_bloat_metrics(targets, size_map, trans_deps, in_degrees)
 
 
 def build_explain_theoretical_dataframe(
@@ -315,8 +342,7 @@ def build_explain_theoretical_dataframe(
     """Constructs a dependency breakdown DataFrame using theoretical metrics."""
     graph, trans_deps, in_degrees, pkg_map = _build_global_topology(metadata)
 
-    if target not in graph:
-        raise ValueError(f"Package '{target}' not found in the catalog.")
+    _require_targets([target], graph, CATALOG)
 
     resolution_set = {target} | trans_deps[target]
     size_map = _resolve_theoretical_sizes(resolution_set, pkg_map, arch)

@@ -3,7 +3,7 @@ import json
 import pytest
 from typer.testing import CliRunner
 
-from dark_matter_cli import __version__
+from dark_matter_cli import PackageNotFoundError, __version__
 from dark_matter_cli.cli import app
 
 runner = CliRunner()
@@ -72,16 +72,103 @@ def test_inspect_command_installed(mocker, mock_brew_metadata):
     assert result.exit_code == 0
 
 
-def test_compare_command_missing_packages(mocker, mock_brew_metadata):
-    """Verify compare handles non-existent package lists via pipeline error capture."""
+def test_compare_missing_packages_declined(mocker, mock_brew_metadata):
+    """Verify declining the fallback with nothing installed exits non-zero."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
+    )
+    catalog = mocker.patch("dark_matter_cli.cli.get_theoretical_catalog")
+
+    result = runner.invoke(app, ["compare", "fake-1", "fake-2"], input="n\n")
+    assert result.exit_code == 1
+    assert "'fake-1', 'fake-2' are not installed" in result.stdout
+    catalog.assert_not_called()
+
+
+def test_compare_declined_keeps_installed_subset(mocker, mock_brew_metadata):
+    """Verify declining the fallback still compares the installed packages."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
+    )
+    build = mocker.patch(
+        "dark_matter_cli.cli.build_compare_analysis_dataframe",
+        side_effect=[PackageNotFoundError(["fake"], "local installation"), "df"],
+    )
+    render = mocker.patch("dark_matter_cli.display.render_bloat_table")
+
+    result = runner.invoke(app, ["compare", "pkg-a", "fake"], input="n\n")
+    assert result.exit_code == 0
+    assert build.call_args.kwargs["targets"] == ["pkg-a"]
+    assert render.call_args.kwargs["is_theoretical"] is False
+
+
+def test_inspect_falls_back_to_catalog(mocker, mock_brew_metadata):
+    """Verify inspect offers the catalog for an uninstalled package."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
+    )
+    mocker.patch(
+        "dark_matter_cli.cli.get_theoretical_catalog", return_value=mock_brew_metadata
+    )
+    theoretical = mocker.patch(
+        "dark_matter_cli.cli.build_targeted_theoretical_dataframe"
+    )
+    render = mocker.patch("dark_matter_cli.display.render_bloat_table")
+
+    result = runner.invoke(app, ["inspect", "not-installed"], input="y\n")
+    assert result.exit_code == 0
+    assert theoretical.call_args.kwargs["target"] == "not-installed"
+    assert render.call_args.kwargs["is_theoretical"] is True
+
+
+def test_compare_deduplicates_packages(mocker, mock_brew_metadata):
+    """Verify repeated package names are compared once."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
+    )
+    build = mocker.patch("dark_matter_cli.cli.build_compare_analysis_dataframe")
+    mocker.patch("dark_matter_cli.display.render_bloat_table")
+
+    runner.invoke(app, ["compare", "pkg-a", "pkg-a", "pkg-b"])
+    assert build.call_args.kwargs["targets"] == ["pkg-a", "pkg-b"]
+
+
+def test_explain_declined_fallback_exits(mocker, mock_brew_metadata):
+    """Verify declining explain's fallback exits non-zero."""
     mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
     mocker.patch(
         "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
     )
 
-    result = runner.invoke(app, ["compare", "fake-pkg-1", "fake-pkg-2"])
+    result = runner.invoke(app, ["explain", "not-installed"], input="n\n")
     assert result.exit_code == 1
-    assert "Pipeline Error" in result.stdout
+
+
+def test_verbose_enables_debug_logging(mocker, mock_brew_metadata):
+    """Verify --verbose turns on debug logging for the package logger."""
+    import logging
+
+    from rich.logging import RichHandler
+
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
+    )
+    mocker.patch("dark_matter_cli.cli.build_analysis_dataframe")
+    mocker.patch("dark_matter_cli.display.render_bloat_table")
+    pkg_logger = logging.getLogger("dark_matter_cli")
+
+    runner.invoke(app, ["--verbose", "analyze"])
+    assert pkg_logger.level == logging.DEBUG
+
+    runner.invoke(app, ["analyze"])
+    assert pkg_logger.level == logging.WARNING
+    rich_handlers = [h for h in pkg_logger.handlers if isinstance(h, RichHandler)]
+    assert len(rich_handlers) == 1
 
 
 def test_export_command_json(mocker, mock_brew_metadata):
