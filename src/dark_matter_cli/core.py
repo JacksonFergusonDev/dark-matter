@@ -140,7 +140,10 @@ def _build_global_topology(metadata: dict[str, Any], catalog: bool) -> Topology:
 
     for formula in formulae:
         name = formula["name"]
-        dependency_graph[name] = list(formula.get("dependencies", []))
+        # Dependencies on other tap formulae may use the full `user/tap/name`.
+        dependency_graph[name] = [
+            short_names.get(d, d) for d in formula.get("dependencies", [])
+        ]
         pkg_data_map[name] = formula
         recorded = _recorded_dependencies(formula, short_names)
         closure_graph[name] = list(dict.fromkeys(dependency_graph[name] + recorded))
@@ -154,9 +157,9 @@ def _build_global_topology(metadata: dict[str, Any], catalog: bool) -> Topology:
         # collisions (e.g. the `docker` formula vs. the `docker` cask).
         key = f"{token} (cask)" if token in dependency_graph else token
         depends_on = cask.get("depends_on", {})
-        dependency_graph[key] = list(depends_on.get("formula", [])) + list(
-            depends_on.get("cask", [])
-        )
+        dependency_graph[key] = [
+            short_names.get(d, d) for d in depends_on.get("formula", [])
+        ] + list(depends_on.get("cask", []))
         closure_graph[key] = dependency_graph[key]
         pkg_data_map[key] = cask
 
