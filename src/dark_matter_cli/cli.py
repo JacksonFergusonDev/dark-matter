@@ -251,7 +251,7 @@ def inspect(
             top_n=1,
             fractional=True,
             is_theoretical=is_theoretical,
-            leaves_only=False,
+            roots_only=False,
         )
 
 
@@ -288,7 +288,7 @@ def compare(
             top_n=len(packages),
             fractional=True,
             is_theoretical=is_theoretical,
-            leaves_only=False,
+            roots_only=False,
         )
 
 
