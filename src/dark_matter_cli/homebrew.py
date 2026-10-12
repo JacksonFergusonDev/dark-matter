@@ -188,6 +188,7 @@ class KegSizes:
     Attributes:
         current: Bytes in the keg Homebrew currently uses.
         stale: Bytes in each older keg `brew cleanup` would remove, by version.
+            Older kegs that `brew cleanup` would keep are in neither field.
     """
 
     current: int
@@ -216,11 +217,60 @@ def _current_keg(formula: dict[str, Any], prefix: Path) -> str | None:
     return str(version) if version else None
 
 
+def _latest_keg(formula: dict[str, Any]) -> str | None:
+    """The keg name of the formula's newest stable version, e.g. '1.2_1'."""
+    stable = (formula.get("versions") or {}).get("stable")
+    if not stable:
+        return None
+    revision = formula.get("revision") or 0
+    return f"{stable}_{revision}" if revision else str(stable)
+
+
+def _keg_link_target(link: Path) -> str | None:
+    """The keg name a Homebrew bookkeeping symlink points at, if any."""
+    return link.resolve().name if link.is_symlink() else None
+
+
+def _has_live_keepme_refs(keg: Path) -> bool:
+    """Whether a keg's `.keepme` file names a path that still exists."""
+    try:
+        refs = (keg / ".keepme").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    return any(ref.strip() and Path(ref.strip()).exists() for ref in refs)
+
+
+def _cleanup_candidates(
+    formula: dict[str, Any], prefix: Path, kegs: list[Path], current: str
+) -> list[Path]:
+    """The older kegs `brew cleanup` would actually remove.
+
+    Mirrors Homebrew's `Formula#eligible_kegs_for_cleanup`: a formula is
+    skipped until its newest version is installed, and a linked keg, the
+    pinned keg, or a keg still referenced by a `.keepme` file is never
+    removed. HEAD installs are skipped, since ordering them needs Homebrew's
+    version logic; erring this way never overstates what cleanup frees.
+    """
+    names = {k.name for k in kegs}
+    latest = _latest_keg(formula)
+    if latest not in names or any(n.startswith("HEAD") for n in names):
+        return []
+
+    keep = {
+        current,
+        latest,
+        formula.get("linked_keg"),
+        _keg_link_target(prefix / "var" / "homebrew" / "pinned" / formula["name"]),
+    }
+    return [k for k in kegs if k.name not in keep and not _has_live_keepme_refs(k)]
+
+
 def get_keg_sizes(formula: dict[str, Any], prefix: Path) -> KegSizes:
     """Measure a formula's current keg separately from any older kegs.
 
     When the current keg can't be identified, the whole Cellar directory is
-    treated as current so nothing is reported as removable by mistake.
+    treated as current so nothing is reported as removable by mistake. Older
+    kegs count as stale only if `brew cleanup` would remove them.
 
     Args:
         formula: A formula entry from `brew info --json=v2 --installed`.
@@ -239,10 +289,12 @@ def get_keg_sizes(formula: dict[str, Any], prefix: Path) -> KegSizes:
     if current is None or current not in {k.name for k in kegs}:
         return KegSizes(current=get_directory_size(rack))
 
-    sizes = {k.name: get_directory_size(k) for k in kegs}
     return KegSizes(
-        current=sizes.pop(current),
-        stale=sizes,
+        current=get_directory_size(rack / current),
+        stale={
+            k.name: get_directory_size(k)
+            for k in _cleanup_candidates(formula, prefix, kegs, current)
+        },
     )
 
 
