@@ -545,15 +545,20 @@ def test_get_keg_sizes_follows_opt_link(tmp_path):
     (tmp_path / "opt").mkdir()
     (tmp_path / "opt" / "foo").symlink_to("../Cellar/foo/2.0_1")
 
-    kegs = homebrew.get_keg_sizes({"name": "foo"}, tmp_path)
+    formula = {"name": "foo", "versions": {"stable": "2.0"}, "revision": 1}
+    kegs = homebrew.get_keg_sizes(formula, tmp_path)
     assert kegs == homebrew.KegSizes(current=30, stale={"1.0": 10, "2.0": 20})
 
 
 @pytest.mark.parametrize(
     "formula",
     [
-        {"name": "foo", "linked_keg": "2.0"},
-        {"name": "foo", "installed": [{"version": "1.0"}, {"version": "2.0"}]},
+        {"name": "foo", "linked_keg": "2.0", "versions": {"stable": "2.0"}},
+        {
+            "name": "foo",
+            "installed": [{"version": "1.0"}, {"version": "2.0"}],
+            "versions": {"stable": "2.0"},
+        },
     ],
 )
 def test_get_keg_sizes_without_opt_link(tmp_path, formula):
@@ -582,6 +587,68 @@ def test_get_keg_sizes_ignores_foreign_opt_link(tmp_path):
 
     kegs = homebrew.get_keg_sizes({"name": "foo", "linked_keg": "1.0"}, tmp_path)
     assert kegs == homebrew.KegSizes(current=10)
+
+
+def _old_and_new_kegs(prefix, name="foo"):
+    """Create kegs 1.0 and 2.0 with opt pointing at 2.0."""
+    _make_rack(prefix, name, {"1.0": 10, "2.0": 20})
+    (prefix / "opt").mkdir()
+    (prefix / "opt" / name).symlink_to(f"../Cellar/{name}/2.0")
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        # The newest version (3.0) isn't installed, so brew cleanup skips it.
+        {"name": "foo", "versions": {"stable": "3.0"}},
+        # Without version info the newest version can't be confirmed.
+        {"name": "foo"},
+        # A linked keg is never removed.
+        {"name": "foo", "versions": {"stable": "2.0"}, "linked_keg": "1.0"},
+    ],
+)
+def test_get_keg_sizes_keeps_what_cleanup_keeps(tmp_path, formula):
+    """Verify old kegs brew cleanup would keep aren't reported as stale."""
+    _old_and_new_kegs(tmp_path)
+    kegs = homebrew.get_keg_sizes(formula, tmp_path)
+    assert kegs == homebrew.KegSizes(current=20)
+
+
+def test_get_keg_sizes_keeps_pinned_keg(tmp_path):
+    """Verify the pinned keg isn't stale."""
+    _old_and_new_kegs(tmp_path)
+    pins = tmp_path / "var" / "homebrew" / "pinned"
+    pins.mkdir(parents=True)
+    (pins / "foo").symlink_to(tmp_path / "Cellar" / "foo" / "1.0")
+
+    formula = {"name": "foo", "versions": {"stable": "2.0"}, "pinned": True}
+    assert homebrew.get_keg_sizes(formula, tmp_path) == homebrew.KegSizes(current=20)
+
+
+@pytest.mark.parametrize(("ref_exists", "stale"), [(True, {}), (False, {"1.0": 10})])
+def test_get_keg_sizes_honors_keepme(tmp_path, ref_exists, stale):
+    """Verify a .keepme file keeps a keg only while its reference exists."""
+    _old_and_new_kegs(tmp_path)
+    ref = tmp_path / "user-of-foo"
+    if ref_exists:
+        ref.touch()
+    (tmp_path / "Cellar" / "foo" / "1.0" / ".keepme").write_text(f"{ref}\n")
+
+    formula = {"name": "foo", "versions": {"stable": "2.0"}}
+    kegs = homebrew.get_keg_sizes(formula, tmp_path)
+    # The .keepme file itself is counted in the old keg's size.
+    expected = {v: s + len(f"{ref}\n") for v, s in stale.items()}
+    assert kegs == homebrew.KegSizes(current=20, stale=expected)
+
+
+def test_get_keg_sizes_skips_head_installs(tmp_path):
+    """Verify HEAD installs are never reported as stale."""
+    _make_rack(tmp_path, "foo", {"2.0": 20, "HEAD-abc1234": 5})
+    (tmp_path / "opt").mkdir()
+    (tmp_path / "opt" / "foo").symlink_to("../Cellar/foo/HEAD-abc1234")
+
+    formula = {"name": "foo", "versions": {"stable": "2.0"}}
+    assert homebrew.get_keg_sizes(formula, tmp_path) == homebrew.KegSizes(current=5)
 
 
 def test_get_keg_sizes_missing_rack(tmp_path):

@@ -64,7 +64,7 @@ Run with `--verbose` to see this check for your own installation.
 - **Cleanup planning**
   - `reclaim` — how much space `brew uninstall <packages>` followed by `brew autoremove` would free, and which uninstalls Homebrew would refuse because something still needs the package.
   - `orphans` — dependencies nothing you requested still needs: what `brew autoremove` would remove, with sizes.
-  - `cleanup` — old versions still sitting in the Cellar that `brew cleanup` would remove.
+  - `cleanup` — old versions still sitting in the Cellar that `brew cleanup` would remove. Like Homebrew, it leaves alone formulae whose newest version isn't installed yet, and pinned or linked versions.
   - `diff` — compares two `export` snapshots to show what grew, shrank, appeared, or disappeared, e.g. after a `brew upgrade`.
 - **Fractional Attribution Model** — shared dependencies (`openssl`, `zlib`, etc.) are divided evenly across the root packages that need them instead of being double-counted, and the shares add up to exactly the bytes measured. See [the attribution model](#the-attribution-model).
 - **Daemon-free** — no background indexing, no persistent database. Every run is a fresh, on-demand computation.
