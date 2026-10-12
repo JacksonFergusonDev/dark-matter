@@ -95,25 +95,21 @@ def test_build_targeted_analysis_dataframe_missing(mock_brew_metadata):
         )
 
 
-def test_build_compare_analysis_dataframe_partial_matches(
-    mocker, mock_brew_metadata, mock_brew_sizes
-):
-    """Verify comparison structures filter invalid targets while correctly resolving remaining ones."""
+def test_build_compare_analysis_dataframe_reports_all_missing(mock_brew_metadata):
+    """Verify comparisons name every missing target instead of dropping them."""
+    with pytest.raises(core.PackageNotFoundError) as exc:
+        core.build_compare_analysis_dataframe(
+            mock_brew_metadata, Path("/mock"), ["pkg-b", "nope-1", "nope-2"]
+        )
+    assert exc.value.packages == ["nope-1", "nope-2"]
+    assert exc.value.location == core.INSTALLED
+    assert "Packages 'nope-1', 'nope-2' not found" in str(exc.value)
 
-    def mock_get_directory_size(path: Path) -> int:
-        return int(mock_brew_sizes.get(path.name, 0))
 
-    mocker.patch(
-        "dark_matter_cli.homebrew.get_directory_size",
-        side_effect=mock_get_directory_size,
-    )
-    mocker.patch("pathlib.Path.exists", return_value=True)
-
-    df = core.build_compare_analysis_dataframe(
-        mock_brew_metadata, Path("/mock"), ["pkg-b", "invalid-pkg"]
-    )
-    assert len(df) == 1
-    assert df.iloc[0]["Package"] == "pkg-b"
+def test_build_compare_theoretical_dataframe_missing(mock_brew_metadata):
+    """Verify catalog comparisons reject unknown packages."""
+    with pytest.raises(core.PackageNotFoundError, match="not found in the catalog"):
+        core.build_compare_theoretical_dataframe(mock_brew_metadata, ["pkg-a", "nope"])
 
 
 def test_build_explain_analysis_dataframe_valid(

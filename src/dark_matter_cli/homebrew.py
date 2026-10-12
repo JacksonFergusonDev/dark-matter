@@ -31,6 +31,7 @@ def _run_brew(args: list[str], failure: str) -> str:
     Raises:
         RuntimeError: If brew is not installed or the command fails.
     """
+    logger.debug(f"Running: brew {' '.join(args)}")
     try:
         result = subprocess.run(
             ["brew", *args],
@@ -434,11 +435,13 @@ def get_theoretical_catalog(
     internal_dir = api_dir / "internal"
     internal_path = internal_dir / f"packages.{tag}.jws.json"
     if internal_path.exists():
+        logger.debug(f"Loading Homebrew 7 catalog from {internal_path}")
         return _load_internal_catalog(internal_path, tag)
 
     formula_api_path = api_dir / "formula.json"
     formula_jws_path = api_dir / "formula.jws.json"
     if formula_jws_path.exists() or formula_api_path.exists():
+        logger.debug(f"Loading legacy catalog from {api_dir}")
         return {
             "formulae": _load_api_cache(formula_api_path, formula_jws_path),
             "casks": _load_api_cache(api_dir / "cask.json", api_dir / "cask.jws.json"),
@@ -633,6 +636,10 @@ def resolve_bottle_sizes(
         else:
             pending.append((digest, url, repository))
 
+    logger.debug(
+        f"Bottle sizes: {len(bottles) - len(pending)} cached or unresolvable, "
+        f"{len(pending)} to fetch from ghcr.io"
+    )
     if not pending:
         return resolved
 
@@ -668,5 +675,9 @@ def resolve_bottle_sizes(
             else:
                 resolved[digest] = size
                 cache[digest] = size
+
+    failed = sum(1 for digest, _, _ in pending if digest not in cache)
+    if failed:
+        logger.debug(f"Failed to resolve {failed} bottle size(s); they count as 0")
 
     return resolved
