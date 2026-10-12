@@ -152,72 +152,228 @@ def get_directory_size(path: Path) -> int:
     return total_size
 
 
-def _load_api_cache(json_path: Path, jws_path: Path) -> list[dict[str, Any]]:
-    if jws_path.exists():
+def _read_jws_payload(jws_path: Path) -> Any:
+    """Decode the JSON payload embedded in a Homebrew JWS cache file.
+
+    Args:
+        jws_path: Path to a `*.jws.json` file.
+
+    Returns:
+        Any: The decoded payload, or None if the file or payload is malformed.
+    """
+    try:
         with open(jws_path, encoding="utf-8") as f:
             jws_data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.error(f"Failed to read {jws_path}: {e}")
+        return None
 
-        payload = jws_data.get("payload", "")
+    payload = jws_data.get("payload") if isinstance(jws_data, dict) else None
+    if not isinstance(payload, str):
+        logger.error(f"JWS payload in {jws_path} is not a string.")
+        return None
 
-        if not isinstance(payload, str):
-            logger.error("JWS payload is not a string!")
-            return []
+    try:
+        return json.loads(payload)
+    except json.JSONDecodeError as e:
+        logger.error(f"Failed to parse JWS payload: {e}")
+        return None
 
+
+def _load_api_cache(json_path: Path, jws_path: Path) -> list[dict[str, Any]]:
+    """Load a legacy (pre-Homebrew 7) formula or cask API cache."""
+    if jws_path.exists():
+        data = _read_jws_payload(jws_path)
+    elif json_path.exists():
         try:
-            data = json.loads(payload)
-        except json.JSONDecodeError as e:
-            logger.error(f"Failed to parse JWS payload: {e}")
+            with open(json_path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error(f"Failed to read {json_path}: {e}")
             return []
+    else:
+        return []
 
-        if not isinstance(data, list):
-            logger.error("API payload is not a list.")
-            return []
+    if not isinstance(data, list):
+        logger.error("API payload is not a list.")
+        return []
 
-        return data
+    return data
 
-    if json_path.exists():
-        with open(json_path, encoding="utf-8") as f:
-            data = json.load(f)
 
-        if not isinstance(data, list):
-            logger.error("API cache is not a list.")
-            return []
+_GHCR_CORE_BLOB_URL = "https://ghcr.io/v2/homebrew/core/{image}/blobs/sha256:{digest}"
 
-        return data
+# Dependency tags that `brew info` leaves out of a formula's runtime
+# `dependencies` list.
+_NON_RUNTIME_DEPENDENCY_TAGS = {":build", ":test", ":optional"}
 
-    return []
+
+def _runtime_dependencies(entries: list[Any]) -> list[str]:
+    """Extract runtime dependency names from Homebrew 7 dependency entries.
+
+    Entries are either a bare name or a `{name: tag}` mapping, where the tag
+    is a string or list such as ':build'.
+
+    Args:
+        entries: The raw dependency entries.
+
+    Returns:
+        list[str]: Names of dependencies required at runtime.
+    """
+    deps: list[str] = []
+    for entry in entries:
+        if isinstance(entry, str):
+            deps.append(entry)
+        elif isinstance(entry, dict):
+            for name, tags in entry.items():
+                tag_set = {tags} if isinstance(tags, str) else set(tags)
+                if not tag_set & _NON_RUNTIME_DEPENDENCY_TAGS:
+                    deps.append(name)
+    return deps
+
+
+def _ghcr_image_name(formula: str) -> str:
+    """Map a formula name to its ghcr.io image name, as Homebrew does."""
+    return formula.replace("@", "/").replace("+", "x")
+
+
+def _normalize_internal_formula(
+    name: str, formula: dict[str, Any], tag: str
+) -> dict[str, Any]:
+    """Convert a Homebrew 7 formula entry into the legacy `brew info` shape.
+
+    Args:
+        name: The formula name.
+        formula: The raw entry from the internal packages payload.
+        tag: The bottle tag the payload was generated for.
+
+    Returns:
+        dict[str, Any]: An entry with `name`, `dependencies`, and (when a
+            bottle exists) `bottle.stable.files`.
+    """
+    deps = _runtime_dependencies(formula.get("stable_dependencies", []))
+
+    # macOS ships these libraries; on Linux they are real dependencies.
+    if tag.endswith("_linux"):
+        deps += _runtime_dependencies(
+            [spec[0] for spec in formula.get("stable_uses_from_macos", []) if spec]
+        )
+
+    entry: dict[str, Any] = {"name": name, "dependencies": deps}
+
+    checksum = formula.get("bottle_checksum")
+    if checksum:
+        # `bottle_tag` is only present when it differs from the payload's tag.
+        bottle_tag = str(formula.get("bottle_tag", tag)).removeprefix(":")
+        url = _GHCR_CORE_BLOB_URL.format(image=_ghcr_image_name(name), digest=checksum)
+        entry["bottle"] = {
+            "stable": {"files": {bottle_tag: {"sha256": checksum, "url": url}}}
+        }
+
+    return entry
+
+
+def _normalize_internal_cask(token: str, cask: dict[str, Any]) -> dict[str, Any]:
+    """Convert a Homebrew 7 cask entry into the legacy `brew info` shape.
+
+    Args:
+        token: The cask token.
+        cask: The raw entry from the internal packages payload.
+
+    Returns:
+        dict[str, Any]: An entry with `token`, `name`, and `depends_on`.
+    """
+    formulae = cask.get("depends_on_args", {}).get(":formula", [])
+    if isinstance(formulae, str):
+        formulae = [formulae]
+
+    return {
+        "token": token,
+        "name": cask.get("names", []),
+        "depends_on": {"formula": list(formulae)} if formulae else {},
+    }
+
+
+def _load_internal_catalog(jws_path: Path, tag: str) -> dict[str, list[dict[str, Any]]]:
+    """Load Homebrew 7's single-file `packages.<tag>.jws.json` catalog.
+
+    Args:
+        jws_path: Path to the internal packages JWS file.
+        tag: The bottle tag the file was generated for.
+
+    Returns:
+        dict: A dictionary containing 'formulae' and 'casks' lists in the
+            legacy shape.
+
+    Raises:
+        RuntimeError: If the file cannot be parsed.
+    """
+    data = _read_jws_payload(jws_path)
+    if not isinstance(data, dict):
+        raise RuntimeError(f"Failed to parse Homebrew API cache at {jws_path}.")
+
+    formulae = data.get("formulae", {})
+    casks = data.get("casks", {})
+
+    return {
+        "formulae": [
+            _normalize_internal_formula(name, f, tag) for name, f in formulae.items()
+        ],
+        "casks": [_normalize_internal_cask(token, c) for token, c in casks.items()],
+    }
 
 
 def get_theoretical_catalog(
-    api_dir: Path | None = None,
+    api_dir: Path | None = None, tag: str | None = None
 ) -> dict[str, list[dict[str, Any]]]:
     """Directly ingests Homebrew's local API JSON caches, bypassing the CLI entirely.
+
+    Homebrew 7+ stores a single per-platform `internal/packages.<tag>.jws.json`.
+    Older releases store `formula.jws.json` and `cask.jws.json` covering every
+    platform; these are used when the internal file is absent.
 
     Args:
         api_dir: The directory holding Homebrew's API cache. Defaults to the
             `api` folder inside `brew --cache`.
+        tag: The bottle tag to load. Defaults to this machine's.
 
     Returns:
         dict: A dictionary containing 'formulae' and 'casks' lists.
 
     Raises:
-        RuntimeError: If no API cache is present.
+        RuntimeError: If no usable API cache is present.
     """
     if api_dir is None:
         api_dir = get_brew_cache() / "api"
+    tag = tag or detect_bottle_tag()
+
+    internal_dir = api_dir / "internal"
+    internal_path = internal_dir / f"packages.{tag}.jws.json"
+    if internal_path.exists():
+        return _load_internal_catalog(internal_path, tag)
 
     formula_api_path = api_dir / "formula.json"
     formula_jws_path = api_dir / "formula.jws.json"
+    if formula_jws_path.exists() or formula_api_path.exists():
+        return {
+            "formulae": _load_api_cache(formula_api_path, formula_jws_path),
+            "casks": _load_api_cache(api_dir / "cask.json", api_dir / "cask.jws.json"),
+        }
 
-    if not formula_jws_path.exists() and not formula_api_path.exists():
+    cached_tags = sorted(
+        p.name.removeprefix("packages.").removesuffix(".jws.json")
+        for p in internal_dir.glob("packages.*.jws.json")
+    )
+    if cached_tags:
         raise RuntimeError(
-            f"Homebrew API cache not found in {api_dir}. Please run `brew update` first."
+            f"No Homebrew catalog cached for '{tag}' (available: "
+            f"{', '.join(cached_tags)}). Homebrew only caches the current "
+            "platform's catalog; omit --arch or pass a cached tag."
         )
 
-    formulae = _load_api_cache(formula_api_path, formula_jws_path)
-    casks = _load_api_cache(api_dir / "cask.json", api_dir / "cask.jws.json")
-
-    return {"formulae": formulae, "casks": casks}
+    raise RuntimeError(
+        f"Homebrew API cache not found in {api_dir}. Please run `brew update` first."
+    )
 
 
 _GHCR_TOKEN_URL = "https://ghcr.io/token"  # noqa: S105

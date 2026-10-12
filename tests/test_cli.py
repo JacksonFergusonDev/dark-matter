@@ -156,3 +156,19 @@ def test_missing_brew_reports_pipeline_error(mocker):
     result = runner.invoke(app, ["analyze"])
     assert result.exit_code == 1
     assert "not found on PATH" in result.stdout
+
+
+def test_catalog_source_passes_arch(mocker, mock_brew_metadata):
+    """Verify --arch selects which cached catalog is loaded."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    catalog = mocker.patch(
+        "dark_matter_cli.cli.get_theoretical_catalog", return_value=mock_brew_metadata
+    )
+    mocker.patch("dark_matter_cli.cli.build_targeted_theoretical_dataframe")
+    mocker.patch("dark_matter_cli.display.render_bloat_table")
+
+    result = runner.invoke(
+        app, ["inspect", "pkg-a", "--source", "catalog", "--arch", "x86_64_linux"]
+    )
+    assert result.exit_code == 0
+    catalog.assert_called_once_with(tag="x86_64_linux")
