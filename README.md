@@ -33,7 +33,7 @@ Dark Matter reconstructs the dependency graph Homebrew already knows about and u
 
 Dark Matter parses Homebrew's own JSON metadata (via `brew info --json=v2` or its local API cache, including Homebrew 7's per-platform format), rebuilds the dependency DAG, and walks it to compute two figures per package:
 
-- **Core size** — the package's own on-disk footprint (or, in theoretical mode, its compressed bottle archive).
+- **Core size** — the package's own on-disk footprint (or, in theoretical mode, its compressed bottle archive). For formulae this is the keg Homebrew currently uses; older versions waiting for `brew cleanup` are reported by `cleanup` instead.
 - **Weighted recursive size** — the core size plus a *fair share* of every transitive dependency, where each shared dependency's cost is divided evenly across the root packages that need it.
 
 The ratio between the two — the **Bloat Ratio** — is the headline number. A low ratio means a package is mostly self-contained; a high ratio means most of its footprint belongs to shared infrastructure it happens to require. Packages with no measurable core size (meta-packages, for example) have no meaningful ratio and show `—`.
@@ -44,6 +44,8 @@ Costs are attributed to **roots**: the packages you asked for (formulae installe
 
 - A root owns its own core size in full. If you requested `python` and something else also depends on it, that dependent isn't charged for `python` — you'd have it either way.
 - Every other package is split evenly across the roots whose dependency closure contains it. Intermediate dependencies never take a share.
+
+Dependencies come from each formula's definition plus the runtime dependencies Homebrew recorded when the keg was installed, which is what `brew autoremove` relies on. A keg keeps linking against what it was built with even after the formula drops a dependency.
 
 Every package is reachable from at least one root, so the shares always add up to what's on disk:
 
@@ -59,6 +61,11 @@ Run with `--verbose` to see this check for your own installation.
   - `inspect` & `compare` — targeted analysis of individual or grouped packages. In theoretical mode, only the targets' dependency closure is resolved over the network rather than the entire catalog.
   - `explain` — breaks down a target package's bloat by attributing fractional byte costs to each of its transitive dependencies.
   - `export` — streams the underlying DataFrames to CSV or JSON for integration into external data pipelines.
+- **Cleanup planning**
+  - `reclaim` — how much space `brew uninstall <packages>` followed by `brew autoremove` would free, and which uninstalls Homebrew would refuse because something still needs the package.
+  - `orphans` — dependencies nothing you requested still needs: what `brew autoremove` would remove, with sizes.
+  - `cleanup` — old versions still sitting in the Cellar that `brew cleanup` would remove.
+  - `diff` — compares two `export` snapshots to show what grew, shrank, appeared, or disappeared, e.g. after a `brew upgrade`.
 - **Fractional Attribution Model** — shared dependencies (`openssl`, `zlib`, etc.) are divided evenly across the root packages that need them instead of being double-counted, and the shares add up to exactly the bytes measured. See [the attribution model](#the-attribution-model).
 - **Daemon-free** — no background indexing, no persistent database. Every run is a fresh, on-demand computation.
 - **Typed and tested** — fully type-annotated (strict `mypy`), linted with `ruff`, and covered by a `pytest` suite exercising the DAG traversal, fractional math, and network resolution logic. CI runs the full suite on macOS and Ubuntu across Python 3.12–3.14 and enforces a coverage floor.
@@ -107,14 +114,24 @@ dark-matter leaderboard
 # Evaluate a specific formula instantly
 dark-matter inspect uv
 
-# Break down the dependency bloat of a specific package
+# Break down the dependency bloat of a specific package, as a table or a tree
 dark-matter explain uv
+dark-matter explain uv --tree
 
 # Compare multiple packages side-by-side
 dark-matter compare uv poetry pdm
 
 # Export the entire graph to JSON for external analysis
 dark-matter export --format json > homebrew_bloat.json
+
+# See what removing packages would free, and what's already removable
+dark-matter reclaim ffmpeg imagemagick
+dark-matter orphans
+dark-matter cleanup
+
+# Snapshot today, then compare after an upgrade
+dark-matter export --format json > snapshot-$(date +%F).json
+dark-matter diff snapshot-2026-10-01.json snapshot-2026-10-12.json
 ```
 
 Exports include every package. Filter on `Is_Root` to get the rows whose `Weighted_Bytes` sum to the total; `Is_Requested` marks the packages you installed on purpose. `Bloat_Ratio` is empty (CSV) or `null` (JSON) when a package has no core size.
@@ -165,6 +182,27 @@ Theoretical modes read the catalog Homebrew caches for the current platform, so 
 | `[PACKAGE]` | **Required** | The specific package to analyze |
 | `--source` / `-s` | `installed` | Data source to compute: `installed` or `catalog` |
 | `--arch` / `-a` | detected | Target bottle tag |
+| `--tree` / `-t` | off | Show the dependency tree instead of a table |
+
+### `reclaim`
+
+| Argument | Default | Description |
+| --- | --- | --- |
+| `[PACKAGES]...` | **Required** | The installed packages to (hypothetically) uninstall |
+
+Only bytes the packages are responsible for are counted: existing orphans are left to `orphans`.
+
+### `orphans` and `cleanup`
+
+Neither takes options. Both measure the local installation only.
+
+### `diff`
+
+| Argument/Flag | Default | Description |
+| --- | --- | --- |
+| `[OLD]` | **Required** | The earlier `export` snapshot (`.csv`, or JSON otherwise) |
+| `[NEW]` | **Required** | The later `export` snapshot |
+| `--top` / `-n` | `20` | Number of packages to display (at least 1) |
 
 ### `export`
 

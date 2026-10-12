@@ -70,7 +70,7 @@ def _is_requested(pkg: dict[str, Any]) -> bool:
 
 
 def _identify_roots(
-    graph: dict[str, list[str]], pkg_data_map: dict[str, Any], catalog: bool
+    trans_deps: dict[str, set[str]], pkg_data_map: dict[str, Any], catalog: bool
 ) -> tuple[frozenset[str], frozenset[str]]:
     """Return (roots, requested) for the graph.
 
@@ -78,8 +78,8 @@ def _identify_roots(
     package is reachable from at least one root. In installed mode, packages
     the user requested are roots too, even when something depends on them.
     """
-    has_dependents = {dep for deps in graph.values() for dep in deps}
-    unreferenced = {pkg for pkg in graph if pkg not in has_dependents}
+    has_dependents = {dep for deps in trans_deps.values() for dep in deps}
+    unreferenced = {pkg for pkg in trans_deps if pkg not in has_dependents}
     if catalog:
         return frozenset(unreferenced), frozenset()
 
@@ -89,15 +89,40 @@ def _identify_roots(
     return frozenset(unreferenced | requested), requested
 
 
+def _recorded_dependencies(
+    formula: dict[str, Any], short_names: dict[str, str]
+) -> list[str]:
+    """The runtime dependencies Homebrew recorded when each keg was installed.
+
+    A keg keeps linking against what it was built with even after the formula
+    drops a dependency, which is why `brew autoremove` trusts this record over
+    the current formula definition.
+    """
+    return [
+        short_names.get(str(dep["full_name"]), str(dep["full_name"]))
+        for keg in formula.get("installed") or []
+        for dep in keg.get("runtime_dependencies") or []
+        if isinstance(dep, dict) and "full_name" in dep
+    ]
+
+
 def _build_global_topology(metadata: dict[str, Any], catalog: bool) -> Topology:
     """Parse metadata and pre-compute the immutable DAG properties."""
     dependency_graph: dict[str, list[str]] = {}
     pkg_data_map: dict[str, Any] = {}
 
-    for formula in metadata.get("formulae", []):
+    formulae = metadata.get("formulae", [])
+    short_names = {f.get("full_name", f["name"]): f["name"] for f in formulae}
+    # Edges used only for closures: declared dependencies plus the runtime
+    # dependencies each installed keg recorded (see _recorded_dependencies).
+    closure_graph: dict[str, list[str]] = {}
+
+    for formula in formulae:
         name = formula["name"]
         dependency_graph[name] = list(formula.get("dependencies", []))
         pkg_data_map[name] = formula
+        recorded = _recorded_dependencies(formula, short_names)
+        closure_graph[name] = list(dict.fromkeys(dependency_graph[name] + recorded))
 
     for cask in metadata.get("casks", []):
         token = cask["token"]
@@ -108,6 +133,7 @@ def _build_global_topology(metadata: dict[str, Any], catalog: bool) -> Topology:
         dependency_graph[key] = list(depends_on.get("formula", [])) + list(
             depends_on.get("cask", [])
         )
+        closure_graph[key] = dependency_graph[key]
         pkg_data_map[key] = cask
 
     logger.debug(
@@ -116,9 +142,9 @@ def _build_global_topology(metadata: dict[str, Any], catalog: bool) -> Topology:
     )
 
     package_transitive_deps = {
-        pkg: get_all_dependencies(pkg, dependency_graph) for pkg in dependency_graph
+        pkg: get_all_dependencies(pkg, closure_graph) for pkg in closure_graph
     }
-    roots, requested = _identify_roots(dependency_graph, pkg_data_map, catalog)
+    roots, requested = _identify_roots(package_transitive_deps, pkg_data_map, catalog)
 
     # Only roots share costs: counting intermediate dependencies as sharers
     # would hand part of each shared package to rows that are never summed.
@@ -149,7 +175,8 @@ def _resolve_physical_sizes(
         if "token" in pkg:
             size_map[name] = homebrew.get_cask_size(pkg, prefix)
         else:
-            size_map[name] = homebrew.get_directory_size(prefix / "Cellar" / name)
+            # Older kegs are cleanup debris, not part of the package's cost.
+            size_map[name] = homebrew.get_keg_sizes(pkg, prefix).current
     return size_map
 
 
@@ -250,6 +277,7 @@ def _compute_explain_metrics(
 ) -> pd.DataFrame:
     """Compile the fractional dependency cost breakdown for a target package."""
     target_deps = topo.trans_deps.get(target, set())
+    subgraph = {target} | target_deps
     results = []
 
     for dep in target_deps:
@@ -261,6 +289,11 @@ def _compute_explain_metrics(
             "Shared_By": 0 if is_root else topo.sharer_count.get(dep, 1),
             "Attributed_Bytes": _attributed_size(dep, size_map, topo),
             "Is_Root": is_root,
+            # Direct dependents within the target's closure, for tree views. A
+            # dependency known only from a keg's install record has no declared
+            # parent, so it hangs off the target.
+            "Required_By": sorted(p for p in subgraph if dep in topo.graph.get(p, []))
+            or [target],
         }
 
         if is_theoretical:
@@ -420,3 +453,167 @@ def build_explain_theoretical_dataframe(
     size_map = _resolve_theoretical_sizes(resolution_set, topo.pkg_data, arch)
 
     return _compute_explain_metrics(target, size_map, topo, is_theoretical=True)
+
+
+def _retained(topo: Topology, anchors: set[str]) -> set[str]:
+    """Every package that stays installed while `anchors` are kept."""
+    kept = set(anchors)
+    for anchor in anchors:
+        kept |= topo.trans_deps[anchor]
+    return kept & topo.graph.keys()
+
+
+def _dependents(topo: Topology, pkg: str, among: set[str]) -> list[str]:
+    """Packages in `among` that depend on `pkg`.
+
+    Prefers declared (direct) dependents, falling back to any package whose
+    closure includes `pkg` when the edge is only known from a keg's record.
+    """
+    direct = sorted(p for p in among if pkg in topo.graph[p])
+    return direct or sorted(p for p in among if pkg in topo.trans_deps[p])
+
+
+@dataclass(frozen=True)
+class Reclaim:
+    """What uninstalling a set of packages would free.
+
+    Attributes:
+        freed: One row per package that would be removed (Package,
+            Core_Bytes, Is_Target), largest first.
+        blocked: Targets Homebrew would refuse to uninstall, mapped to the
+            installed packages that still depend on them.
+    """
+
+    freed: pd.DataFrame
+    blocked: dict[str, list[str]]
+
+
+def build_reclaim_dataframe(
+    metadata: dict[str, Any], prefix: Path, targets: list[str]
+) -> Reclaim:
+    """Measure what `brew uninstall <targets> && brew autoremove` would free.
+
+    Every other root stays installed, including existing orphans, so only
+    bytes the targets are responsible for are counted.
+    """
+    topo = _build_global_topology(metadata, catalog=False)
+    _require_targets(targets, topo.graph, INSTALLED)
+
+    kept = _retained(topo, set(topo.roots) - set(targets))
+    freed = topo.graph.keys() - kept
+    blocked = {t: _dependents(topo, t, kept) for t in targets if t in kept}
+
+    sizes = _resolve_physical_sizes({n: topo.pkg_data[n] for n in freed}, prefix)
+    df = pd.DataFrame(
+        [
+            {"Package": n, "Core_Bytes": sizes[n], "Is_Target": n in targets}
+            for n in freed
+        ],
+        columns=["Package", "Core_Bytes", "Is_Target"],
+    )
+    if not df.empty:
+        df = df.sort_values(by=["Core_Bytes", "Package"], ascending=[False, True])
+    return Reclaim(freed=df, blocked=blocked)
+
+
+def build_orphans_dataframe(metadata: dict[str, Any], prefix: Path) -> pd.DataFrame:
+    """List installed dependencies no requested package needs any more.
+
+    This is the set `brew autoremove` would remove.
+    """
+    topo = _build_global_topology(metadata, catalog=False)
+    orphans = topo.graph.keys() - _retained(topo, set(topo.requested))
+
+    sizes = _resolve_physical_sizes({n: topo.pkg_data[n] for n in orphans}, prefix)
+    df = pd.DataFrame(
+        [
+            {
+                "Package": n,
+                "Core_Bytes": sizes[n],
+                "Required_By": _dependents(topo, n, orphans),
+            }
+            for n in orphans
+        ],
+        columns=["Package", "Core_Bytes", "Required_By"],
+    )
+    if not df.empty:
+        df = df.sort_values(by=["Core_Bytes", "Package"], ascending=[False, True])
+    return df
+
+
+def build_cleanup_dataframe(metadata: dict[str, Any], prefix: Path) -> pd.DataFrame:
+    """List the older kegs `brew cleanup` would remove from the Cellar."""
+    rows: list[dict[str, Any]] = []
+    for formula in metadata.get("formulae", []):
+        kegs = homebrew.get_keg_sizes(formula, prefix)
+        rows.extend(
+            {"Package": formula["name"], "Version": version, "Bytes": size}
+            for version, size in kegs.stale.items()
+        )
+
+    df = pd.DataFrame(rows, columns=["Package", "Version", "Bytes"])
+    if not df.empty:
+        df = df.sort_values(by=["Bytes", "Package"], ascending=[False, True])
+    return df
+
+
+SNAPSHOT_COLUMNS = ("Package", "Core_Bytes", "Weighted_Bytes")
+
+
+def diff_snapshots(old: pd.DataFrame, new: pd.DataFrame) -> pd.DataFrame:
+    """Compare two `export` snapshots package by package.
+
+    Args:
+        old: The earlier export.
+        new: The later export.
+
+    Returns:
+        pd.DataFrame: One row per package that was added, removed, or changed
+        size (Package, Status, Old_Core, New_Core, Core_Delta,
+        Weighted_Delta), largest absolute core change first.
+
+    Raises:
+        ValueError: If either snapshot lacks the columns needed to compare.
+    """
+    for label, df in (("old", old), ("new", new)):
+        missing = [c for c in SNAPSHOT_COLUMNS if c not in df.columns]
+        if missing:
+            raise ValueError(
+                f"The {label} snapshot is missing {', '.join(missing)}; "
+                "create snapshots with `dark-matter export`."
+            )
+
+    merged = old[list(SNAPSHOT_COLUMNS)].merge(
+        new[list(SNAPSHOT_COLUMNS)],
+        on="Package",
+        how="outer",
+        suffixes=("_old", "_new"),
+        indicator=True,
+    )
+    status = merged["_merge"].map(
+        {"left_only": "removed", "right_only": "added", "both": "changed"}
+    )
+    old_core = merged["Core_Bytes_old"].fillna(0)
+    new_core = merged["Core_Bytes_new"].fillna(0)
+    weighted_delta = merged["Weighted_Bytes_new"].fillna(0) - merged[
+        "Weighted_Bytes_old"
+    ].fillna(0)
+
+    df = pd.DataFrame(
+        {
+            "Package": merged["Package"],
+            "Status": status.astype(str),
+            "Old_Core": old_core,
+            "New_Core": new_core,
+            "Core_Delta": new_core - old_core,
+            "Weighted_Delta": weighted_delta,
+        }
+    )
+    changed = (
+        (df["Status"] != "changed")
+        | (df["Core_Delta"] != 0)
+        | (df["Weighted_Delta"] != 0)
+    )
+    df = df[changed]
+    order = df["Core_Delta"].abs().sort_values(ascending=False, kind="stable").index
+    return df.loc[order].reset_index(drop=True)
