@@ -244,6 +244,30 @@ def test_topology_keys_casks_by_token_with_dependencies():
     assert topo.requested == {"docker (cask)", "mactex-no-gui"}
 
 
+def test_topology_resolves_tap_qualified_dependencies():
+    """Verify `user/tap/name` dependencies link to the installed formula."""
+    lib = {"name": "lib", "full_name": "user/tap/lib", "dependencies": []}
+    metadata = {
+        "formulae": [
+            {
+                "name": "app",
+                "full_name": "user/tap/app",
+                "dependencies": ["user/tap/lib"],
+            },
+            lib,
+        ],
+        "casks": [{"token": "gui", "depends_on": {"formula": ["user/tap/lib"]}}],
+    }
+    topo = core._build_global_topology(metadata, catalog=True)
+    assert topo.graph["app"] == ["lib"]
+    assert topo.trans_deps["app"] == {"lib"}
+    # lib has a dependent, so it isn't mistaken for a root.
+    assert topo.roots == {"app"}
+
+    installed = core._build_global_topology(metadata, catalog=False)
+    assert installed.graph["gui"] == ["lib"]
+
+
 def test_physical_sizes_route_casks_and_formulae(mocker):
     """Verify formulae are measured in the Cellar and casks via their artifacts."""
     dir_size = mocker.patch(
