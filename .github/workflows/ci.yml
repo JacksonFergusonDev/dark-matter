@@ -3,8 +3,11 @@ name: CI
 on:
   push:
     branches: [ "main" ]
+  # Run on PRs targeting any branch so stacked PRs are checked too.
   pull_request:
-    branches: [ "main" ]
+
+permissions:
+  contents: read
 
 jobs:
   lint:
@@ -57,9 +60,7 @@ jobs:
         python-version: ${{ matrix.python-version }}
 
     - name: Install dependencies
-      run: |
-        uv sync --locked
-        uv pip install pytest-github-actions-annotate-failures
+      run: uv sync --locked
 
     - name: Run tests
       run: uv run pytest
