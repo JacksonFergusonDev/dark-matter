@@ -363,6 +363,37 @@ def test_attribution_orphans_become_roots():
     assert not df.loc["p", "Is_Root"]
 
 
+_CATALOG_WITH_CASK = {
+    "formulae": [{"name": "ghostscript", "dependencies": []}],
+    "casks": [{"token": "mactex", "depends_on": {"formula": ["ghostscript"]}}],
+}
+
+
+def test_catalog_topology_excludes_casks():
+    """Verify unsized casks neither appear nor take shares in catalog mode."""
+    topo = core._build_global_topology(_CATALOG_WITH_CASK, catalog=True)
+    assert set(topo.graph) == {"ghostscript"}
+    # With the cask gone, nothing depends on ghostscript: it pays for itself.
+    assert topo.roots == {"ghostscript"}
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        lambda m: core.build_targeted_theoretical_dataframe(m, "mactex"),
+        lambda m: core.build_compare_theoretical_dataframe(
+            m, ["ghostscript", "mactex"]
+        ),
+        lambda m: core.build_explain_theoretical_dataframe(m, "mactex"),
+    ],
+)
+def test_catalog_targets_reject_casks(build):
+    """Verify asking the catalog about a cask explains why it can't be sized."""
+    with pytest.raises(ValueError, match="'mactex' is a cask") as exc:
+        build(_CATALOG_WITH_CASK)
+    assert not isinstance(exc.value, core.PackageNotFoundError)
+
+
 def test_catalog_mode_ignores_request_flags():
     """Verify catalog roots are only packages nothing depends on."""
     df = _attribute(

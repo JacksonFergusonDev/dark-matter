@@ -153,6 +153,15 @@ def test_resolve_bottle_sizes_does_not_cache_failures(mocker):
     assert cache == {"ok": 100}
 
 
+def test_resolve_bottle_sizes_warns_about_failures(mocker, caplog):
+    """Verify failed lookups are reported without --verbose."""
+    mocker.patch("dark_matter_cli.homebrew._fetch_ghcr_token", return_value=None)
+
+    with caplog.at_level("WARNING", logger="dark_matter_cli"):
+        homebrew.resolve_bottle_sizes({"d1": _blob_url("wget", "d1")}, {})
+    assert "Couldn't fetch 1 of 1 bottle sizes" in caplog.text
+
+
 def test_resolve_bottle_sizes_token_failure_not_cached(mocker):
     """Verify a failed token request zeroes its batch without caching."""
     mocker.patch("dark_matter_cli.homebrew._fetch_ghcr_token", return_value=None)

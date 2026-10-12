@@ -796,6 +796,10 @@ def resolve_bottle_sizes(
 
     failed = sum(1 for digest, _, _ in pending if digest not in cache)
     if failed:
-        logger.debug(f"Failed to resolve {failed} bottle size(s); they count as 0")
+        logger.warning(
+            f"Couldn't fetch {failed} of {len(pending)} bottle sizes from ghcr.io. "
+            "They count as 0, so sizes and ratios that depend on them are "
+            "understated; run again to retry them."
+        )
 
     return resolved
