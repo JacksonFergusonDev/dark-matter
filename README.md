@@ -58,7 +58,7 @@ Run with `--verbose` to see this check for your own installation.
 ## Features
 
 - **Comprehensive analysis suite**
-  - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts. Casks are measured where they are installed (e.g. `/Applications/Foo.app`), not just their `Caskroom` staging directory.
+  - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts. These are file sizes, like Finder's "Size"; `du` counts allocated disk blocks instead, so it can differ by a few percent. Casks are measured where they are installed (e.g. `/Applications/Foo.app`), not just their `Caskroom` staging directory.
   - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula catalog from the local API cache, without requiring anything to be installed. Casks ship no bottles, so they can only be measured once installed, with `analyze`.
   - `inspect` & `compare` — targeted analysis of individual or grouped packages. In theoretical mode, only the targets' dependency closure is resolved over the network rather than the entire catalog.
   - `explain` — breaks down a target package's bloat by attributing fractional byte costs to each of its transitive dependencies.
@@ -76,11 +76,13 @@ Run with `--verbose` to see this check for your own installation.
 
 `leaderboard`, `inspect`, `compare`, and `explain` rely on `Content-Length` headers from `ghcr.io` blob storage, which report *compressed* archive size, not the size a package occupies once unpacked to disk. The absolute numbers they report will therefore run lower than `analyze`'s physical measurements.
 
-The Bloat Ratio, however, stays meaningful. Since most bottles compress with similar algorithms (gzip or zstd), the compression factor $c$ appears in both the numerator and denominator and cancels out:
+The Bloat Ratio holds up better than the absolute sizes, but compression doesn't cancel out. Each bottle has its own compression factor $c_p$ (unpacked size over archive size), so the theoretical ratio weighs every package by how well it happens to compress:
 
-$$R \approx \frac{c \cdot m_{recursive}}{c \cdot m_{core}} \approx \frac{m_{recursive}}{m_{core}}$$
+$$R_{theoretical} = \frac{m_{core}/c_{core} + \sum_d s_d/c_d}{m_{core}/c_{core}}$$
 
-So while theoretical modes shouldn't be read as precise disk-space forecasts, they are a reliable way to evaluate relative bloat without installing anything.
+where $s_d$ is the unpacked share of dependency $d$. The factors would only cancel if every package compressed equally well, and they don't. Across 106 formulae installed on one `arm64_tahoe` machine, $c_p$ ranged from 1.8× (`bat`) to 7.8× (`libxcb`), with a median of 3.0×. A package that compresses unusually well next to dependencies that don't (or the reverse) can have its theoretical ratio off by up to the spread between those extremes, about 4×.
+
+Treat theoretical modes as a guide to orders of magnitude: they reliably separate a 1× package from a 100× one, but a 2× and a 4× package may well swap places once installed. For real figures, install the packages and run `analyze`, `inspect`, or `explain`.
 
 ## Installation
 
