@@ -54,3 +54,40 @@ def test_render_explain_table_empty(capsys):
     display.render_explain_table(df, target="leaf-node")
     captured = capsys.readouterr()
     assert "has no transitive dependencies" in captured.out
+
+
+def _leaf_frame() -> pd.DataFrame:
+    rows = [
+        {
+            "Package": name,
+            "Is_Leaf": leaf,
+            "Core_Bytes": 10,
+            "Weighted_Bytes": 20,
+            "Standard_Bytes": 20,
+            "Bloat_Ratio": 2.0,
+            "Dep_Count": 1,
+        }
+        for name, leaf in [("top-level", True), ("shared-lib", False)]
+    ]
+    return pd.DataFrame(rows)
+
+
+def test_render_bloat_table_filters_non_leaves_by_default(mocker):
+    """Verify the default leaderboard view only shows leaf packages."""
+    add_row = mocker.patch("rich.table.Table.add_row")
+    mocker.patch("dark_matter_cli.display.console.print")
+
+    display.render_bloat_table(_leaf_frame())
+    assert [c.args[0] for c in add_row.call_args_list] == ["top-level"]
+
+
+def test_render_bloat_table_keeps_requested_targets(mocker):
+    """Verify explicitly requested non-leaf targets are not dropped."""
+    add_row = mocker.patch("rich.table.Table.add_row")
+    mocker.patch("dark_matter_cli.display.console.print")
+
+    display.render_bloat_table(_leaf_frame(), leaves_only=False)
+    assert sorted(c.args[0] for c in add_row.call_args_list) == [
+        "shared-lib",
+        "top-level",
+    ]

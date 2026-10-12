@@ -144,3 +144,20 @@ def test_build_targeted_theoretical_dataframe_bounds(mock_brew_metadata):
         core.build_targeted_theoretical_dataframe(
             mock_brew_metadata, "non-existent", "arm64_tahoe"
         )
+
+
+def test_compare_keeps_accurate_leaf_flags(mocker, mock_brew_metadata):
+    """Verify Is_Leaf reflects the graph rather than being forced for targets."""
+    mocker.patch("dark_matter_cli.homebrew.get_directory_size", return_value=10)
+    mocker.patch("pathlib.Path.exists", return_value=True)
+
+    df = core.build_compare_analysis_dataframe(
+        mock_brew_metadata, Path("/mock"), ["pkg-a", "pkg-d"]
+    )
+    flags = dict(zip(df["Package"], df["Is_Leaf"], strict=True))
+    assert flags == {"pkg-a": True, "pkg-d": False}
+
+    single = core.build_targeted_analysis_dataframe(
+        mock_brew_metadata, Path("/mock"), "pkg-d"
+    )
+    assert not single.iloc[0]["Is_Leaf"]
