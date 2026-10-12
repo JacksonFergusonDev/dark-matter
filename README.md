@@ -138,6 +138,8 @@ dark-matter diff snapshot-2026-10-01.json snapshot-2026-10-12.json
 
 Exports include every package. Filter on `Is_Root` to get the rows whose `Weighted_Bytes` sum to the total; `Is_Requested` marks the packages you installed on purpose. `Bloat_Ratio` is empty (CSV) or `null` (JSON) when a package has no core size.
 
+Sizes are shown in decimal units (1 MB = 1,000,000 bytes), matching Finder. Exports always contain exact byte counts.
+
 All commands accept the global `--verbose` / `-v` flag for debug logging (written to stderr), and `--version` to print the installed version.
 
 When `inspect`, `compare`, or `explain` are pointed at packages that aren't installed, Dark Matter offers to fall back to the theoretical catalog.

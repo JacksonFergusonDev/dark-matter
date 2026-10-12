@@ -6,15 +6,24 @@ from rich.tree import Tree
 console = Console()
 
 
+# Decimal units, as Finder and Disk Utility report sizes on macOS.
+_BYTE_UNITS = (("KB", 1e3, 1), ("MB", 1e6, 1), ("GB", 1e9, 2), ("TB", 1e12, 2))
+
+
 def format_bytes(size: float) -> str:
-    """Dynamically format byte sizes into human-readable strings."""
-    if size < 1024:
+    """Format a byte count in decimal units (1 MB = 1,000,000 bytes).
+
+    The unit is chosen after rounding, so 999,999 bytes reads "1.0 MB"
+    rather than "1000.0 KB".
+    """
+    if round(size) < 1000:
         return f"{size:.0f} B"
-    if size < 1024**2:
-        return f"{size / 1024:.1f} KB"
-    if size < 999 * (1024**2):
-        return f"{size / (1024**2):.1f} MB"
-    return f"{size / (1024**3):.2f} GB"
+    for unit, scale, digits in _BYTE_UNITS[:-1]:
+        value = round(size / scale, digits)
+        if value < 1000:
+            return f"{value:.{digits}f} {unit}"
+    unit, scale, digits = _BYTE_UNITS[-1]
+    return f"{size / scale:.{digits}f} {unit}"
 
 
 def format_delta(size: float) -> str:

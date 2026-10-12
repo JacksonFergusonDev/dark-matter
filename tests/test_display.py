@@ -4,12 +4,26 @@ import pytest
 from dark_matter_cli import display
 
 
-def test_format_bytes():
-    """Verify scale shifting across byte magnitudes."""
-    assert display.format_bytes(500) == "500 B"
-    assert display.format_bytes(1024) == "1.0 KB"
-    assert display.format_bytes(1024**2 * 2.5) == "2.5 MB"
-    assert display.format_bytes(1024**3 * 4.123) == "4.12 GB"
+@pytest.mark.parametrize(
+    ("size", "expected"),
+    [
+        (0, "0 B"),
+        (500, "500 B"),
+        (999.4, "999 B"),
+        # Units are chosen after rounding, so nothing reads "1000 <unit>".
+        (999.6, "1.0 KB"),
+        (1000, "1.0 KB"),
+        (999_949, "999.9 KB"),
+        (999_999, "1.0 MB"),
+        (2_500_000, "2.5 MB"),
+        (999_990_000, "1.00 GB"),
+        (4_123_000_000, "4.12 GB"),
+        (2_500_000_000_000, "2.50 TB"),
+    ],
+)
+def test_format_bytes(size, expected):
+    """Verify decimal units, matching Finder, with rounding-safe boundaries."""
+    assert display.format_bytes(size) == expected
 
 
 def test_render_bloat_table_empty(capsys):
@@ -114,10 +128,10 @@ def test_render_bloat_table_standard_mode_and_severity(mocker):
             {
                 "Package": name,
                 "Is_Root": True,
-                "Core_Bytes": 1024,
+                "Core_Bytes": 1000,
                 "Dep_Count": 1,
                 "Weighted_Bytes": 1,
-                "Standard_Bytes": 2048,
+                "Standard_Bytes": 2000,
                 "Bloat_Ratio": ratio,
             }
             for name, ratio in [("red", 12.0), ("yellow", 4.0), ("green", 1.5)]
@@ -144,7 +158,7 @@ def test_render_explain_table(mocker, is_theoretical, size_col):
         [
             {
                 "Dependency": "openssl",
-                size_col: 2048,
+                size_col: 2000,
                 "Shared_By": 4,
                 "Attributed_Bytes": 512,
                 "Is_Root": False,
@@ -164,7 +178,7 @@ def test_render_explain_table_marks_requested_dependencies(mocker):
         [
             {
                 "Dependency": "python",
-                "Core_Bytes": 2048,
+                "Core_Bytes": 2000,
                 "Shared_By": 0,
                 "Attributed_Bytes": 0.0,
                 "Is_Root": True,
@@ -208,7 +222,7 @@ def test_render_bloat_table_undefined_ratio_sorts_last(mocker):
 
 def test_format_delta():
     """Verify signed deltas are colored by direction."""
-    assert display.format_delta(2048) == "[red]+2.0 KB[/red]"
+    assert display.format_delta(2000) == "[red]+2.0 KB[/red]"
     assert display.format_delta(-512) == "[green]-512 B[/green]"
     assert display.format_delta(0) == "[dim]0 B[/dim]"
 
@@ -231,9 +245,9 @@ def test_render_explain_tree(capsys):
                 "Required_By": parents,
             }
             for name, size, shared, root, parents in [
-                ("python", 4096, 0, True, ["app"]),
-                ("openssl", 2048, 2, False, ["app", "python"]),
-                ("zlib", 1024, 1, False, ["openssl"]),
+                ("python", 4000, 0, True, ["app"]),
+                ("openssl", 2000, 2, False, ["app", "python"]),
+                ("zlib", 1000, 1, False, ["openssl"]),
             ]
         ]
     )
@@ -258,8 +272,8 @@ def test_render_reclaim(capsys):
     """Verify freed packages, the total, and blocked targets are shown."""
     freed = pd.DataFrame(
         [
-            {"Package": "app", "Core_Bytes": 2048, "Is_Target": True},
-            {"Package": "dep", "Core_Bytes": 1024, "Is_Target": False},
+            {"Package": "app", "Core_Bytes": 2000, "Is_Target": True},
+            {"Package": "dep", "Core_Bytes": 1000, "Is_Target": False},
         ]
     )
     display.render_reclaim(freed, {"lib": ["x", "y"]}, ["app", "lib"])
@@ -280,8 +294,8 @@ def test_render_orphans(capsys):
     """Verify orphans list who still needs them and the total."""
     df = pd.DataFrame(
         [
-            {"Package": "p", "Core_Bytes": 1024, "Required_By": ["o"]},
-            {"Package": "o", "Core_Bytes": 1024, "Required_By": []},
+            {"Package": "p", "Core_Bytes": 1000, "Required_By": ["o"]},
+            {"Package": "o", "Core_Bytes": 1000, "Required_By": []},
         ]
     )
     display.render_orphans(df)
@@ -292,7 +306,7 @@ def test_render_orphans(capsys):
 
 def test_render_cleanup(capsys):
     """Verify stale kegs are listed with a total."""
-    df = pd.DataFrame([{"Package": "a", "Version": "1.0", "Bytes": 2048}])
+    df = pd.DataFrame([{"Package": "a", "Version": "1.0", "Bytes": 2000}])
     display.render_cleanup(df)
     out = capsys.readouterr().out
     assert "1.0" in out
@@ -327,13 +341,13 @@ def test_render_diff(mocker):
                 "Weighted_Delta": new - old,
             }
             for name, status, old, new in [
-                ("grew", "changed", 1024, 3072),
-                ("gone", "removed", 1024, 0),
+                ("grew", "changed", 1000, 3000),
+                ("gone", "removed", 1000, 0),
             ]
         ]
     )
 
-    display.render_diff(df, top_n=1, old_total=2048, new_total=3072)
+    display.render_diff(df, top_n=1, old_total=2000, new_total=3000)
 
     add_row.assert_called_once_with(
         "grew", "changed", "3.0 KB", "[red]+2.0 KB[/red]", "[red]+2.0 KB[/red]"
