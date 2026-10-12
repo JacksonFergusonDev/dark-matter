@@ -204,22 +204,28 @@ def _resolve_physical_sizes(
 
 
 def _select_bottle_file(files: dict[str, Any], tag: str) -> Any:
-    """Pick the bottle matching `tag`, falling back like Homebrew would.
+    """Pick the bottle Homebrew would pour for `tag`.
 
     Preference order: the exact tag, an arch-independent 'all' bottle, then
-    the newest bottle for the same CPU and OS family. Bottles for a different
-    CPU or OS are never substituted.
+    (on macOS only) the newest bottle for the same CPU built for an older
+    macOS release. Homebrew never pours a bottle built for a newer macOS, a
+    different CPU, or another Linux tag, so neither does this.
     """
     if tag in files:
         return files[tag]
     if "all" in files:
         return files["all"]
 
-    def family(t: str) -> tuple[bool, bool]:
-        return (t.startswith("arm64_"), t.endswith("_linux"))
+    target = homebrew.macos_bottle_version(tag)
+    if target is None:
+        return None
 
     # Homebrew lists bottles newest-first.
-    return next((v for k, v in files.items() if family(k) == family(tag)), None)
+    for candidate, file_info in files.items():
+        version = homebrew.macos_bottle_version(candidate)
+        if version is not None and version[0] == target[0] and version[1] <= target[1]:
+            return file_info
+    return None
 
 
 def _resolve_theoretical_sizes(

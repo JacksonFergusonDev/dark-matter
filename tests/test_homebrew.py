@@ -244,6 +244,22 @@ def test_save_bottle_size_cache_unwritable(cache_path, mocker, caplog):
     assert "Could not write bottle size cache" in caplog.text
 
 
+@pytest.mark.parametrize(
+    ("tag", "expected"),
+    [
+        ("arm64_sonoma", ("arm64", 14)),
+        ("arm64_big_sur", ("arm64", 11)),
+        ("tahoe", ("x86_64", 26)),
+        ("x86_64_linux", None),
+        ("all", None),
+        ("catalina", None),
+    ],
+)
+def test_macos_bottle_version(tag, expected):
+    """Verify macOS bottle tags split into CPU and major version."""
+    assert homebrew.macos_bottle_version(tag) == expected
+
+
 def test_get_brew_cache(mocker):
     """Verify cache directory extraction from `brew --cache`."""
     run = mocker.patch("subprocess.run")
