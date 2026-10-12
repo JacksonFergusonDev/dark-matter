@@ -62,5 +62,5 @@ jobs:
     - name: Install dependencies
       run: uv sync --locked
 
-    - name: Run tests
-      run: uv run pytest
+    - name: Run tests with coverage
+      run: uv run pytest --cov

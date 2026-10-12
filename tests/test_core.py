@@ -237,3 +237,42 @@ def test_physical_sizes_route_casks_and_formulae(mocker):
     assert sizes == {"wget": 10, "brave-browser": 99}
     dir_size.assert_called_once_with(Path("/brew/Cellar/wget"))
     cask_size.assert_called_once_with({"token": "brave-browser"}, Path("/brew"))
+
+
+@pytest.fixture
+def theoretical_sizes(mocker, mock_brew_sizes):
+    """Resolve each package's theoretical size from mock_brew_sizes."""
+    return mocker.patch(
+        "dark_matter_cli.core._resolve_theoretical_sizes",
+        side_effect=lambda names, *_: {n: mock_brew_sizes[n] for n in names},
+    )
+
+
+def test_build_compare_theoretical_dataframe_resolves_union(
+    mock_brew_metadata, theoretical_sizes
+):
+    """Verify only the targets' combined closure is resolved."""
+    df = core.build_compare_theoretical_dataframe(
+        mock_brew_metadata, ["pkg-b", "pkg-c"]
+    )
+
+    assert theoretical_sizes.call_args.args[0] == {"pkg-b", "pkg-c", "pkg-d"}
+    assert set(df["Package"]) == {"pkg-b", "pkg-c"}
+
+
+def test_build_explain_theoretical_dataframe_sorted(
+    mock_brew_metadata, theoretical_sizes
+):
+    """Verify theoretical explain rows use archive sizes, sorted by attribution."""
+    df = core.build_explain_theoretical_dataframe(mock_brew_metadata, "pkg-a")
+
+    # pkg-b and pkg-d tie at 200 attributed bytes; ties sort by name.
+    assert list(df["Dependency"]) == ["pkg-c", "pkg-b", "pkg-d"]
+    assert list(df["Archive_Bytes"]) == [300, 200, 600]
+    assert list(df["Attributed_Bytes"]) == [300.0, 200.0, 200.0]
+
+
+def test_build_explain_leaf_has_no_rows(mock_brew_metadata, theoretical_sizes):
+    """Verify a package with no dependencies yields an empty breakdown."""
+    df = core.build_explain_theoretical_dataframe(mock_brew_metadata, "pkg-d")
+    assert df.empty

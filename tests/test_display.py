@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from dark_matter_cli import display
 
@@ -91,3 +92,53 @@ def test_render_bloat_table_keeps_requested_targets(mocker):
         "shared-lib",
         "top-level",
     ]
+
+
+def test_render_bloat_table_standard_mode_and_severity(mocker):
+    """Verify --standard sizes and every ratio severity band are rendered."""
+    add_row = mocker.patch("rich.table.Table.add_row")
+    mocker.patch("dark_matter_cli.display.console.print")
+    df = pd.DataFrame(
+        [
+            {
+                "Package": name,
+                "Is_Leaf": True,
+                "Core_Bytes": 1024,
+                "Dep_Count": 1,
+                "Weighted_Bytes": 1,
+                "Standard_Bytes": 2048,
+                "Bloat_Ratio": ratio,
+            }
+            for name, ratio in [("red", 12.0), ("yellow", 4.0), ("green", 1.5)]
+        ]
+    )
+
+    display.render_bloat_table(df, fractional=False, is_theoretical=True)
+
+    rows = {c.args[0]: c.args for c in add_row.call_args_list}
+    assert rows["red"][2] == "2.0 KB"
+    assert "bold red" in rows["red"][3]
+    assert "bold yellow" in rows["yellow"][3]
+    assert "green" in rows["green"][3]
+
+
+@pytest.mark.parametrize(
+    ("is_theoretical", "size_col"), [(True, "Archive_Bytes"), (False, "Core_Bytes")]
+)
+def test_render_explain_table(mocker, is_theoretical, size_col):
+    """Verify explain rows render the right size column for each mode."""
+    add_row = mocker.patch("rich.table.Table.add_row")
+    mocker.patch("dark_matter_cli.display.console.print")
+    df = pd.DataFrame(
+        [
+            {
+                "Dependency": "openssl",
+                size_col: 2048,
+                "Shared_By": 4,
+                "Attributed_Bytes": 512,
+            }
+        ]
+    )
+
+    display.render_explain_table(df, target="curl", is_theoretical=is_theoretical)
+    add_row.assert_called_once_with("openssl", "2.0 KB", "4", "512 B")

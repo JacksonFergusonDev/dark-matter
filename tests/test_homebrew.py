@@ -507,3 +507,25 @@ def test_cask_artifact_paths_infers_legacy_app_locations():
         Path("/Applications/Adobe Suite"),
         Path("/Opt/Absolute.app"),
     ]
+
+
+def test_get_brew_metadata_invalid_json(mocker):
+    """Verify unparseable brew output raises a RuntimeError."""
+    mocker.patch("subprocess.run").return_value.stdout = "not json"
+
+    with pytest.raises(RuntimeError, match="Failed to parse Homebrew JSON"):
+        homebrew.get_brew_metadata()
+
+
+def test_fetch_ghcr_token_success(mocker):
+    """Verify every repository is sent as its own scope parameter."""
+    get = mocker.patch("requests.get")
+    get.return_value.json.return_value = {"token": "abc"}
+
+    token = homebrew._fetch_ghcr_token(["homebrew/core/a", "homebrew/core/b"], 1.0)
+    assert token == "abc"
+    assert get.call_args.kwargs["params"] == [
+        ("service", "ghcr.io"),
+        ("scope", "repository:homebrew/core/a:pull"),
+        ("scope", "repository:homebrew/core/b:pull"),
+    ]

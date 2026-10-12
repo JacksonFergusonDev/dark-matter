@@ -212,7 +212,11 @@ def _compute_explain_metrics(
 
     df = pd.DataFrame(results)
     if not df.empty:
-        df = df.sort_values(by="Attributed_Bytes", ascending=False)
+        # Break ties by name so output is stable across runs (set iteration
+        # order depends on string hash randomization).
+        df = df.sort_values(
+            by=["Attributed_Bytes", "Dependency"], ascending=[False, True]
+        )
 
     return df
 
