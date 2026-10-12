@@ -40,7 +40,7 @@ The ratio between the two — the **Bloat Ratio** — is the headline number. A 
 
 ### The attribution model
 
-Costs are attributed to **roots**: the packages you asked for (formulae installed on request, and every cask), plus any package nothing else depends on, such as an orphaned dependency. In catalog mode nothing is "requested", so roots are the packages no other package depends on.
+Costs are attributed to **roots**: the packages you asked for (formulae installed on request, and every cask), plus any package nothing else depends on, such as an orphaned dependency. In catalog mode nothing is "requested", so roots are the formulae no other formula depends on.
 
 - A root owns its own core size in full. If you requested `python` and something else also depends on it, that dependent isn't charged for `python` — you'd have it either way.
 - Every other package is split evenly across the roots whose dependency closure contains it. Intermediate dependencies never take a share.
@@ -57,7 +57,7 @@ Run with `--verbose` to see this check for your own installation.
 
 - **Comprehensive analysis suite**
   - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts. Casks are measured where they are installed (e.g. `/Applications/Foo.app`), not just their `Caskroom` staging directory.
-  - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula and cask catalog from the local API cache, without requiring anything to be installed.
+  - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula catalog from the local API cache, without requiring anything to be installed. Casks ship no bottles, so they can only be measured once installed, with `analyze`.
   - `inspect` & `compare` — targeted analysis of individual or grouped packages. In theoretical mode, only the targets' dependency closure is resolved over the network rather than the entire catalog.
   - `explain` — breaks down a target package's bloat by attributing fractional byte costs to each of its transitive dependencies.
   - `export` — streams the underlying DataFrames to CSV or JSON for integration into external data pipelines.
@@ -140,7 +140,7 @@ All commands accept the global `--verbose` / `-v` flag for debug logging (writte
 
 When `inspect`, `compare`, or `explain` are pointed at packages that aren't installed, Dark Matter offers to fall back to the theoretical catalog.
 
-Theoretical modes read the catalog Homebrew caches for the current platform, so run `brew update` first if it's missing. `--arch` defaults to this machine's bottle tag (e.g. `arm64_tahoe`, `x86_64_linux`).
+Theoretical modes read the catalog Homebrew caches for the current platform, so run `brew update` first if it's missing. Formulae without a bottle for the platform count as 0, and so do bottles whose size couldn't be fetched from ghcr.io; Dark Matter warns when that happens, and the next run retries them. `--arch` defaults to this machine's bottle tag (e.g. `arm64_tahoe`, `x86_64_linux`).
 
 ### `analyze`
 

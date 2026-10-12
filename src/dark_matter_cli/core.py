@@ -39,6 +39,27 @@ def _require_targets(
         raise PackageNotFoundError(missing, location)
 
 
+def _require_catalog_targets(
+    targets: list[str], graph: dict[str, list[str]], metadata: dict[str, Any]
+) -> None:
+    """Like _require_targets, but explain that casks can't be sized here.
+
+    Raises:
+        ValueError: If a target is a cask.
+        PackageNotFoundError: If a target is missing from the catalog.
+    """
+    tokens = {c.get("token") for c in metadata.get("casks", [])}
+    casks = [t for t in targets if t not in graph and t in tokens]
+    if casks:
+        names = ", ".join(f"'{c}'" for c in casks)
+        raise ValueError(
+            f"{names} {'is a cask' if len(casks) == 1 else 'are casks'}. "
+            "Casks have no bottles, so the catalog can't size them; install "
+            "and analyze them with --source installed."
+        )
+    _require_targets(targets, graph, CATALOG)
+
+
 @dataclass(frozen=True)
 class Topology:
     """Immutable DAG properties shared by every analysis mode.
@@ -124,7 +145,10 @@ def _build_global_topology(metadata: dict[str, Any], catalog: bool) -> Topology:
         recorded = _recorded_dependencies(formula, short_names)
         closure_graph[name] = list(dict.fromkeys(dependency_graph[name] + recorded))
 
-    for cask in metadata.get("casks", []):
+    # Casks ship no bottles, so the catalog has nothing to size them by;
+    # leaving them in would let unsized casks take shares of formulae.
+    casks = [] if catalog else metadata.get("casks", [])
+    for cask in casks:
         token = cask["token"]
         # Formulae and casks share a namespace in the graph; disambiguate
         # collisions (e.g. the `docker` formula vs. the `docker` cask).
@@ -137,8 +161,7 @@ def _build_global_topology(metadata: dict[str, Any], catalog: bool) -> Topology:
         pkg_data_map[key] = cask
 
     logger.debug(
-        f"Dependency graph: {len(dependency_graph)} packages "
-        f"({len(metadata.get('casks', []))} casks)"
+        f"Dependency graph: {len(dependency_graph)} packages ({len(casks)} casks)"
     )
 
     package_transitive_deps = {
@@ -218,6 +241,10 @@ def _resolve_theoretical_sizes(
             if digest and url:
                 package_digest[name] = digest
                 bottles[digest] = url
+
+    unbottled = len(resolution_set) - len(package_digest)
+    if unbottled:
+        logger.debug(f"{unbottled} package(s) have no {tag} bottle; they count as 0")
 
     cache = homebrew.load_bottle_size_cache()
     resolved_sizes = homebrew.resolve_bottle_sizes(bottles, cache)
@@ -415,7 +442,7 @@ def build_targeted_theoretical_dataframe(
     """Constructs a DataFrame for a single target, minimizing network resolution."""
     topo = _build_global_topology(metadata, catalog=True)
 
-    _require_targets([target], topo.graph, CATALOG)
+    _require_catalog_targets([target], topo.graph, metadata)
 
     # Isolate strictly to the target's closure to prevent O(N) network lookups
     resolution_set = {target} | topo.trans_deps[target]
@@ -430,7 +457,7 @@ def build_compare_theoretical_dataframe(
     """Constructs a DataFrame for multiple targets by resolving their unioned closure."""
     topo = _build_global_topology(metadata, catalog=True)
 
-    _require_targets(targets, topo.graph, CATALOG)
+    _require_catalog_targets(targets, topo.graph, metadata)
 
     # Generate the union of all target transitive dependencies
     resolution_set = set(targets)
@@ -447,7 +474,7 @@ def build_explain_theoretical_dataframe(
     """Constructs a dependency breakdown DataFrame using theoretical metrics."""
     topo = _build_global_topology(metadata, catalog=True)
 
-    _require_targets([target], topo.graph, CATALOG)
+    _require_catalog_targets([target], topo.graph, metadata)
 
     resolution_set = {target} | topo.trans_deps[target]
     size_map = _resolve_theoretical_sizes(resolution_set, topo.pkg_data, arch)
