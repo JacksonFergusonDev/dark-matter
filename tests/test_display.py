@@ -32,7 +32,7 @@ def test_render_bloat_table_with_severe_ratios(mocker):
                 "Standard_Bytes": 1500,
                 "Bloat_Ratio": 15.0,
                 "Dep_Count": 5,
-                "Is_Leaf": True,
+                "Is_Root": True,
             },
             {
                 "Package": "clean-pkg",
@@ -41,7 +41,7 @@ def test_render_bloat_table_with_severe_ratios(mocker):
                 "Standard_Bytes": 110,
                 "Bloat_Ratio": 1.1,
                 "Dep_Count": 0,
-                "Is_Leaf": True,
+                "Is_Root": True,
             },
         ]
     )
@@ -57,37 +57,37 @@ def test_render_explain_table_empty(capsys):
     assert "has no transitive dependencies" in captured.out
 
 
-def _leaf_frame() -> pd.DataFrame:
+def _root_frame() -> pd.DataFrame:
     rows = [
         {
             "Package": name,
-            "Is_Leaf": leaf,
+            "Is_Root": root,
             "Core_Bytes": 10,
             "Weighted_Bytes": 20,
             "Standard_Bytes": 20,
             "Bloat_Ratio": 2.0,
             "Dep_Count": 1,
         }
-        for name, leaf in [("top-level", True), ("shared-lib", False)]
+        for name, root in [("top-level", True), ("shared-lib", False)]
     ]
     return pd.DataFrame(rows)
 
 
-def test_render_bloat_table_filters_non_leaves_by_default(mocker):
-    """Verify the default leaderboard view only shows leaf packages."""
+def test_render_bloat_table_filters_non_roots_by_default(mocker):
+    """Verify the default leaderboard view only shows root packages."""
     add_row = mocker.patch("rich.table.Table.add_row")
     mocker.patch("dark_matter_cli.display.console.print")
 
-    display.render_bloat_table(_leaf_frame())
+    display.render_bloat_table(_root_frame())
     assert [c.args[0] for c in add_row.call_args_list] == ["top-level"]
 
 
 def test_render_bloat_table_keeps_requested_targets(mocker):
-    """Verify explicitly requested non-leaf targets are not dropped."""
+    """Verify explicitly requested non-root targets are not dropped."""
     add_row = mocker.patch("rich.table.Table.add_row")
     mocker.patch("dark_matter_cli.display.console.print")
 
-    display.render_bloat_table(_leaf_frame(), leaves_only=False)
+    display.render_bloat_table(_root_frame(), roots_only=False)
     assert sorted(c.args[0] for c in add_row.call_args_list) == [
         "shared-lib",
         "top-level",
@@ -102,7 +102,7 @@ def test_render_bloat_table_standard_mode_and_severity(mocker):
         [
             {
                 "Package": name,
-                "Is_Leaf": True,
+                "Is_Root": True,
                 "Core_Bytes": 1024,
                 "Dep_Count": 1,
                 "Weighted_Bytes": 1,
@@ -136,9 +136,60 @@ def test_render_explain_table(mocker, is_theoretical, size_col):
                 size_col: 2048,
                 "Shared_By": 4,
                 "Attributed_Bytes": 512,
+                "Is_Root": False,
             }
         ]
     )
 
     display.render_explain_table(df, target="curl", is_theoretical=is_theoretical)
     add_row.assert_called_once_with("openssl", "2.0 KB", "4", "512 B")
+
+
+def test_render_explain_table_marks_requested_dependencies(mocker):
+    """Verify requested dependencies are labelled instead of given a sharer count."""
+    add_row = mocker.patch("rich.table.Table.add_row")
+    mocker.patch("dark_matter_cli.display.console.print")
+    df = pd.DataFrame(
+        [
+            {
+                "Dependency": "python",
+                "Core_Bytes": 2048,
+                "Shared_By": 0,
+                "Attributed_Bytes": 0.0,
+                "Is_Root": True,
+            }
+        ]
+    )
+
+    display.render_explain_table(df, target="x")
+    add_row.assert_called_once_with("python", "2.0 KB", "[dim]requested[/dim]", "0 B")
+
+
+def test_render_bloat_table_undefined_ratio_sorts_last(mocker):
+    """Verify a NaN ratio renders as a dash and sorts below every real ratio."""
+    add_row = mocker.patch("rich.table.Table.add_row")
+    mocker.patch("dark_matter_cli.display.console.print")
+    df = pd.DataFrame(
+        [
+            {
+                "Package": name,
+                "Is_Root": True,
+                "Core_Bytes": core,
+                "Weighted_Bytes": 100,
+                "Standard_Bytes": 100,
+                "Bloat_Ratio": ratio,
+                "Dep_Count": 1,
+            }
+            for name, core, ratio in [
+                ("meta", 0, float("nan")),
+                ("lean", 100, 1.0),
+                ("heavy", 10, 10.0),
+            ]
+        ]
+    )
+
+    display.render_bloat_table(df, sort_by="ratio")
+
+    rows = [c.args for c in add_row.call_args_list]
+    assert [r[0] for r in rows] == ["heavy", "lean", "meta"]
+    assert rows[-1][3] == "[dim]—[/dim]"

@@ -22,7 +22,7 @@ def render_bloat_table(
     top_n: int = 20,
     fractional: bool = True,
     is_theoretical: bool = False,
-    leaves_only: bool = True,
+    roots_only: bool = True,
 ) -> None:
     """Render the mathematical analysis as a formatted terminal table.
 
@@ -32,16 +32,16 @@ def render_bloat_table(
         top_n: The maximum number of rows to print to standard output.
         fractional: Boolean flag to display the Fractional Attribution Model data.
         is_theoretical: Boolean flag to indicate if the data is from theoretical analysis.
-        leaves_only: Restrict rows to packages nothing else depends on. Disable
-            when rendering explicitly requested targets.
+        roots_only: Restrict rows to root packages (requested, or with nothing
+            depending on them). Disable when rendering explicitly requested targets.
     """
-    if df.empty or "Is_Leaf" not in df.columns:
+    if df.empty or "Is_Root" not in df.columns:
         console.print("[bold red]No package data available to render.[/bold red]")
         return
 
-    # Filter explicitly for root invocations (leaves)
-    if leaves_only:
-        df = df[df["Is_Leaf"]]
+    # Only roots' weighted sizes add up to the total; hide intermediate deps.
+    if roots_only:
+        df = df[df["Is_Root"]]
 
     # Map the CLI flag to the corresponding DataFrame column
     sort_map = {
@@ -51,7 +51,7 @@ def render_bloat_table(
     }
     sort_col = sort_map.get(sort_by, "Bloat_Ratio")
 
-    df = df.sort_values(by=sort_col, ascending=False).head(top_n)
+    df = df.sort_values(by=sort_col, ascending=False, na_position="last").head(top_n)
 
     table = Table(
         title="[bold]Dark Matter: Homebrew Bloat Analysis[/bold]",
@@ -83,8 +83,10 @@ def render_bloat_table(
         ratio = row["Bloat_Ratio"]
         deps = int(row["Dep_Count"])
 
-        # Color code the bloat severity
-        if ratio >= 10.0:
+        # Color code the bloat severity; an empty core leaves the ratio undefined
+        if pd.isna(ratio):
+            ratio_str = "[dim]—[/dim]"
+        elif ratio >= 10.0:
             ratio_str = f"[bold red]{ratio:.1f}x[/bold red]"
         elif ratio >= 3.0:
             ratio_str = f"[bold yellow]{ratio:.1f}x[/bold yellow]"
@@ -125,10 +127,14 @@ def render_explain_table(
     table.add_column("Attributed Size", justify="right", style="magenta")
 
     for _, row in df.iterrows():
+        # Requested packages are paid for by themselves, not their dependents.
+        shared_by = (
+            "[dim]requested[/dim]" if row["Is_Root"] else str(int(row["Shared_By"]))
+        )
         table.add_row(
             str(row["Dependency"]),
             format_bytes(row[size_col]),
-            str(int(row["Shared_By"])),
+            shared_by,
             format_bytes(row["Attributed_Bytes"]),
         )
 
