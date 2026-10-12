@@ -43,14 +43,17 @@ def render_bloat_table(
         fractional: Boolean flag to display the Fractional Attribution Model data.
         is_theoretical: Boolean flag to indicate if the data is from theoretical analysis.
         roots_only: Restrict rows to root packages (requested, or with nothing
-            depending on them). Disable when rendering explicitly requested targets.
+            depending on them). Disable when rendering explicitly requested
+            targets, or to list dependencies too.
     """
     if df.empty or "Is_Root" not in df.columns:
         console.print("[bold red]No package data available to render.[/bold red]")
         return
 
     # Only roots' weighted sizes add up to the total; hide intermediate deps.
+    hidden = 0
     if roots_only:
+        hidden = int((~df["Is_Root"]).sum())
         df = df[df["Is_Root"]]
 
     # Map the CLI flag to the corresponding DataFrame column
@@ -68,6 +71,12 @@ def render_bloat_table(
         show_header=True,
         header_style="bold cyan",
     )
+    if hidden:
+        noun = "dependency" if hidden == 1 else "dependencies"
+        table.caption = (
+            f"{hidden} {noun} not shown: each one's size is shared among the "
+            "packages that need it. List them with --all."
+        )
 
     table.add_column("Package", style="white", no_wrap=True)
 
@@ -103,8 +112,13 @@ def render_bloat_table(
         else:
             ratio_str = f"[green]{ratio:.1f}x[/green]"
 
+        # A dependency's weighted size overlaps the roots that need it.
+        name = str(row["Package"])
+        if not row["Is_Root"]:
+            name += " [dim]· dependency[/dim]"
+
         table.add_row(
-            str(row["Package"]),
+            name,
             format_bytes(core_bytes),
             format_bytes(rec_bytes),
             ratio_str,
