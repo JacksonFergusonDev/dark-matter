@@ -169,6 +169,16 @@ def test_compare_keeps_accurate_root_flags(mocker, mock_brew_metadata):
         ({"sequoia": "intel", "arm64_sequoia": "older"}, "arm64_tahoe", "older"),
         ({"x86_64_linux": "linux"}, "arm64_tahoe", None),
         ({"arm64_sequoia": "mac-arm"}, "sequoia", None),
+        # Bottles built for a newer macOS are never poured on an older one.
+        ({"arm64_tahoe": "newer"}, "arm64_sequoia", None),
+        (
+            {"arm64_tahoe": "newer", "arm64_sonoma": "older", "arm64_ventura": "old"},
+            "arm64_sequoia",
+            "older",
+        ),
+        ({"sonoma": "newer", "monterey": "older"}, "ventura", "older"),
+        # Linux has no fallback beyond 'all'.
+        ({"arm64_linux": "linux-arm"}, "x86_64_linux", None),
         (
             {"arm64_linux": "linux-arm", "x86_64_linux": "linux"},
             "x86_64_linux",
@@ -177,7 +187,7 @@ def test_compare_keeps_accurate_root_flags(mocker, mock_brew_metadata):
     ],
 )
 def test_select_bottle_file(files, tag, expected):
-    """Verify bottle fallback never crosses CPU or OS families."""
+    """Verify bottle fallback matches Homebrew: same CPU, older macOS only."""
     assert core._select_bottle_file(files, tag) == expected
 
 

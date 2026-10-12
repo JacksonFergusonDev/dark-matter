@@ -103,6 +103,23 @@ _MACOS_CODENAMES = {
 }
 
 
+def macos_bottle_version(tag: str) -> tuple[str, int] | None:
+    """Split a macOS bottle tag into its CPU and macOS major version.
+
+    Args:
+        tag: A bottle tag such as 'arm64_sonoma' or 'ventura'.
+
+    Returns:
+        tuple[str, int] | None: e.g. ('arm64', 14) or ('x86_64', 13), or None
+            for Linux, 'all', and codenames Homebrew no longer bottles for.
+    """
+    codename = tag.removeprefix("arm64_")
+    versions = {name: major for major, name in _MACOS_CODENAMES.items()}
+    if codename not in versions:
+        return None
+    return ("arm64" if codename != tag else "x86_64", versions[codename])
+
+
 def detect_bottle_tag() -> str:
     """Infer the Homebrew bottle tag for the current machine.
 
