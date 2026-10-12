@@ -37,6 +37,8 @@ app = typer.Typer(
 )
 console = Console()
 
+ALL_HELP = "Also list dependencies, not only the packages their sizes are shared by."
+
 ARCH_HELP = (
     "Target bottle tag (e.g. arm64_tahoe, x86_64_linux). Defaults to this machine's."
 )
@@ -180,6 +182,7 @@ def analyze(
         20, "--top", "-n", min=1, help="Number of packages to display."
     ),
     fractional: bool = typer.Option(True, "--fractional/--standard"),
+    show_all: bool = typer.Option(False, "--all", "-A", help=ALL_HELP),
 ) -> None:
     """Execute the storage bloat analysis pipeline."""
     console.print("[bold cyan]Initializing Dark Matter pipeline...[/bold cyan]")
@@ -197,7 +200,11 @@ def analyze(
             df = build_analysis_dataframe(metadata, prefix)
 
         display.render_bloat_table(
-            df, sort_by=sort_by, top_n=top_n, fractional=fractional
+            df,
+            sort_by=sort_by,
+            top_n=top_n,
+            fractional=fractional,
+            roots_only=not show_all,
         )
 
 
@@ -210,6 +217,7 @@ def leaderboard(
         20, "--top", "-n", min=1, help="Number of packages to display."
     ),
     arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
+    show_all: bool = typer.Option(False, "--all", "-A", help=ALL_HELP),
 ) -> None:
     """Evaluate the complete theoretical ecosystem leaderboard."""
     console.print("[bold cyan]Accessing local ecosystem cache...[/bold cyan]")
@@ -223,7 +231,12 @@ def leaderboard(
             df = build_theoretical_dataframe(metadata, arch=arch)
 
         display.render_bloat_table(
-            df, sort_by=sort_by, top_n=top_n, fractional=True, is_theoretical=True
+            df,
+            sort_by=sort_by,
+            top_n=top_n,
+            fractional=True,
+            is_theoretical=True,
+            roots_only=not show_all,
         )
 
 

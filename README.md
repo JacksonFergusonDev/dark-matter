@@ -47,6 +47,8 @@ Costs are attributed to **roots**: the packages you asked for (formulae installe
 
 Dependencies come from each formula's definition plus the runtime dependencies Homebrew recorded when the keg was installed, which is what `brew autoremove` relies on. A keg keeps linking against what it was built with even after the formula drops a dependency.
 
+`analyze` and `leaderboard` list only roots by default, because a dependency's size is already counted in the roots that share it. That can hide large packages: in the catalog, `texlive` (about 2 GB) has a single dependent, so it shows up as that package's weighted size. Pass `--all` to list dependencies too; their weighted sizes overlap their roots', so don't add them up.
+
 Every package is reachable from at least one root, so the shares always add up to what's on disk:
 
 $$\sum_{r \in \text{roots}} W(r) = \sum_{p} m_{core}(p)$$
@@ -149,6 +151,7 @@ Theoretical modes read the catalog Homebrew caches for the current platform, so 
 | `--sort` / `-s` | `ratio` | Sort by `ratio`, `core`, or `recursive` |
 | `--top` / `-n` | `20` | Number of packages to display (at least 1) |
 | `--fractional` / `--standard` | `--fractional` | Toggle the Fractional Attribution Model |
+| `--all` / `-A` | off | Also list dependencies, marked `· dependency` |
 
 ### `leaderboard`
 
@@ -157,6 +160,7 @@ Theoretical modes read the catalog Homebrew caches for the current platform, so 
 | `--sort` / `-s` | `ratio` | Sort by `ratio`, `core`, or `recursive` |
 | `--top` / `-n` | `20` | Number of packages to display (at least 1) |
 | `--arch` / `-a` | detected | Target bottle tag |
+| `--all` / `-A` | off | Also list dependencies, marked `· dependency` |
 
 ### `inspect`
 

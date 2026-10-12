@@ -89,9 +89,20 @@ def test_render_bloat_table_keeps_requested_targets(mocker):
 
     display.render_bloat_table(_root_frame(), roots_only=False)
     assert sorted(c.args[0] for c in add_row.call_args_list) == [
-        "shared-lib",
+        "shared-lib [dim]· dependency[/dim]",
         "top-level",
     ]
+
+
+def test_render_bloat_table_captions_hidden_dependencies(mocker):
+    """Verify the roots-only view says how many dependencies it hides."""
+    printed = mocker.patch("dark_matter_cli.display.console.print")
+
+    display.render_bloat_table(_root_frame())
+    assert printed.call_args.args[0].caption.startswith("1 dependency not shown")
+
+    display.render_bloat_table(_root_frame(), roots_only=False)
+    assert printed.call_args.args[0].caption is None
 
 
 def test_render_bloat_table_standard_mode_and_severity(mocker):

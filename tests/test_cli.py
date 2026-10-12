@@ -33,6 +33,28 @@ def test_analyze_command(mocker, mock_brew_metadata):
     assert result.exit_code == 0
 
 
+@pytest.mark.parametrize(
+    ("command", "builder", "source"),
+    [
+        ("analyze", "build_analysis_dataframe", "get_brew_metadata"),
+        ("leaderboard", "build_theoretical_dataframe", "get_theoretical_catalog"),
+    ],
+)
+@pytest.mark.parametrize(("flags", "roots_only"), [([], True), (["--all"], False)])
+def test_all_flag_lists_dependencies(
+    mocker, mock_brew_metadata, command, builder, source, flags, roots_only
+):
+    """Verify --all turns off the roots-only view."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(f"dark_matter_cli.cli.{source}", return_value=mock_brew_metadata)
+    mocker.patch(f"dark_matter_cli.cli.{builder}")
+    render = mocker.patch("dark_matter_cli.display.render_bloat_table")
+
+    result = runner.invoke(app, [command, *flags])
+    assert result.exit_code == 0
+    assert render.call_args.kwargs["roots_only"] is roots_only
+
+
 def test_handle_pipeline_errors_catches_runtime_error():
     """Verify that handle_pipeline_errors gracefully catches and exits with code 1."""
     import typer
