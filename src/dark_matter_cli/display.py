@@ -1,6 +1,7 @@
 import pandas as pd
 from rich.console import Console
 from rich.table import Table
+from rich.tree import Tree
 
 console = Console()
 
@@ -14,6 +15,15 @@ def format_bytes(size: float) -> str:
     if size < 999 * (1024**2):
         return f"{size / (1024**2):.1f} MB"
     return f"{size / (1024**3):.2f} GB"
+
+
+def format_delta(size: float) -> str:
+    """Format a signed byte change, red for growth and green for shrinkage."""
+    if size > 0:
+        return f"[red]+{format_bytes(size)}[/red]"
+    if size < 0:
+        return f"[green]-{format_bytes(-size)}[/green]"
+    return "[dim]0 B[/dim]"
 
 
 def render_bloat_table(
@@ -139,3 +149,181 @@ def render_explain_table(
         )
 
     console.print(table)
+
+
+def render_explain_tree(
+    df: pd.DataFrame, target: str, is_theoretical: bool = False
+) -> None:
+    """Render a target's dependencies as a tree with attributed sizes.
+
+    A dependency reached by several paths is expanded the first time it
+    appears and marked as shown above after that.
+    """
+    if df.empty:
+        console.print(f"[green]'{target}' has no transitive dependencies.[/green]")
+        return
+
+    size_col = "Archive_Bytes" if is_theoretical else "Core_Bytes"
+    rows = {str(r["Dependency"]): r for _, r in df.iterrows()}
+    children: dict[str, list[str]] = {}
+    for name, row in rows.items():
+        for parent in row["Required_By"]:
+            children.setdefault(parent, []).append(name)
+    for kids in children.values():
+        kids.sort(key=lambda n: (-rows[n]["Attributed_Bytes"], n))
+
+    total = df["Attributed_Bytes"].sum()
+    tree = Tree(f"[bold]{target}[/bold] [dim]· {format_bytes(total)} attributed[/dim]")
+    seen: set[str] = set()
+
+    def label(name: str) -> str:
+        row = rows[name]
+        size = format_bytes(row[size_col])
+        if row["Is_Root"]:
+            return f"{name} [dim]{size} · requested[/dim]"
+        share = format_bytes(row["Attributed_Bytes"])
+        shared = int(row["Shared_By"])
+        detail = f" of {size}, shared by {shared}" if shared > 1 else ""
+        return f"{name} [magenta]{share}[/magenta][dim]{detail}[/dim]"
+
+    def add(branch: Tree, name: str) -> None:
+        if name in seen:
+            branch.add(f"[dim]{name} (shown above)[/dim]")
+            return
+        seen.add(name)
+        node = branch.add(label(name))
+        for child in children.get(name, []):
+            add(node, child)
+
+    for child in children.get(target, []):
+        add(tree, child)
+
+    console.print(tree)
+
+
+def render_reclaim(
+    freed: pd.DataFrame, blocked: dict[str, list[str]], targets: list[str]
+) -> None:
+    """Render what uninstalling the targets would free."""
+    for target, dependents in blocked.items():
+        console.print(
+            f"[bold yellow]'{target}' can't be uninstalled:[/bold yellow] "
+            f"required by {', '.join(dependents)}."
+        )
+
+    if freed.empty:
+        console.print("[dim]Nothing would be freed.[/dim]")
+        return
+
+    table = Table(
+        title=f"[bold]Reclaimable by removing {', '.join(targets)}[/bold]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Package", style="white", no_wrap=True)
+    table.add_column("Size", justify="right", style="magenta")
+    table.add_column("Removed As", style="dim")
+
+    for _, row in freed.iterrows():
+        table.add_row(
+            str(row["Package"]),
+            format_bytes(row["Core_Bytes"]),
+            "requested" if row["Is_Target"] else "dependency",
+        )
+
+    console.print(table)
+    console.print(
+        f"[bold]Total:[/bold] {format_bytes(freed['Core_Bytes'].sum())} "
+        f"across {len(freed)} packages "
+        "[dim](brew uninstall, then brew autoremove)[/dim]"
+    )
+
+
+def render_orphans(df: pd.DataFrame) -> None:
+    """Render dependencies nothing requested needs any more."""
+    if df.empty:
+        console.print("[green]No orphaned dependencies.[/green]")
+        return
+
+    table = Table(
+        title="[bold]Orphaned Dependencies[/bold]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Package", style="white", no_wrap=True)
+    table.add_column("Size", justify="right", style="magenta")
+    table.add_column("Needed By", style="dim")
+
+    for _, row in df.iterrows():
+        needed_by = ", ".join(row["Required_By"]) or "—"
+        table.add_row(str(row["Package"]), format_bytes(row["Core_Bytes"]), needed_by)
+
+    console.print(table)
+    console.print(
+        f"[bold]Total:[/bold] {format_bytes(df['Core_Bytes'].sum())} "
+        "[dim](reclaim with brew autoremove)[/dim]"
+    )
+
+
+def render_cleanup(df: pd.DataFrame) -> None:
+    """Render older kegs left behind in the Cellar."""
+    if df.empty:
+        console.print("[green]No old versions in the Cellar.[/green]")
+        return
+
+    table = Table(
+        title="[bold]Old Versions in the Cellar[/bold]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Package", style="white", no_wrap=True)
+    table.add_column("Version", style="dim")
+    table.add_column("Size", justify="right", style="magenta")
+
+    for _, row in df.iterrows():
+        table.add_row(
+            str(row["Package"]), str(row["Version"]), format_bytes(row["Bytes"])
+        )
+
+    console.print(table)
+    console.print(
+        f"[bold]Total:[/bold] {format_bytes(df['Bytes'].sum())} "
+        "[dim](reclaim with brew cleanup)[/dim]"
+    )
+
+
+def render_diff(
+    df: pd.DataFrame, top_n: int, old_total: float, new_total: float
+) -> None:
+    """Render the packages that changed between two snapshots."""
+    console.print(
+        f"[bold]Total core size:[/bold] {format_bytes(old_total)} → "
+        f"{format_bytes(new_total)} ({format_delta(new_total - old_total)})"
+    )
+    if df.empty:
+        console.print("[dim]No packages changed.[/dim]")
+        return
+
+    table = Table(
+        title="[bold]Snapshot Diff[/bold]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Package", style="white", no_wrap=True)
+    table.add_column("Status", style="dim")
+    table.add_column("Core Size", justify="right", style="dim")
+    table.add_column("Core Δ", justify="right")
+    table.add_column("Weighted Δ", justify="right")
+
+    for _, row in df.head(top_n).iterrows():
+        table.add_row(
+            str(row["Package"]),
+            str(row["Status"]),
+            format_bytes(row["New_Core"] or row["Old_Core"]),
+            format_delta(row["Core_Delta"]),
+            format_delta(row["Weighted_Delta"]),
+        )
+
+    console.print(table)
+    if len(df) > top_n:
+        console.print(f"[dim]…and {len(df) - top_n} more.[/dim]")

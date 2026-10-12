@@ -13,13 +13,17 @@ from dark_matter_cli import (
     PackageNotFoundError,
     __version__,
     build_analysis_dataframe,
+    build_cleanup_dataframe,
     build_compare_analysis_dataframe,
     build_compare_theoretical_dataframe,
     build_explain_analysis_dataframe,
     build_explain_theoretical_dataframe,
+    build_orphans_dataframe,
+    build_reclaim_dataframe,
     build_targeted_analysis_dataframe,
     build_targeted_theoretical_dataframe,
     build_theoretical_dataframe,
+    diff_snapshots,
     display,
     get_brew_metadata,
     get_brew_prefix,
@@ -326,6 +330,9 @@ def explain(
     package: str = typer.Argument(..., help="The specific package to analyze."),
     source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
     arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
+    tree: bool = typer.Option(
+        False, "--tree", "-t", help="Show the dependency tree instead of a table."
+    ),
 ) -> None:
     """Break down the bloat of a package by its dependencies."""
     console.print(
@@ -345,7 +352,75 @@ def explain(
             ),
         )
 
-        display.render_explain_table(df, target=package, is_theoretical=is_theoretical)
+        render = display.render_explain_tree if tree else display.render_explain_table
+        render(df, target=package, is_theoretical=is_theoretical)
+
+
+@app.command()
+def reclaim(
+    packages: list[str] = typer.Argument(..., help="The packages to uninstall."),
+) -> None:
+    """Measure the space freed by uninstalling packages and their unused deps."""
+    packages = list(dict.fromkeys(packages))
+
+    with handle_pipeline_errors():
+        prefix, metadata, _ = load_ecosystem_context(ExportSource.installed, console)
+        with console.status("[yellow]Measuring reclaimable packages...[/yellow]"):
+            result = build_reclaim_dataframe(metadata, prefix, packages)
+
+        display.render_reclaim(result.freed, result.blocked, packages)
+
+
+@app.command()
+def orphans() -> None:
+    """List installed dependencies that nothing you requested still needs."""
+    with handle_pipeline_errors():
+        prefix, metadata, _ = load_ecosystem_context(ExportSource.installed, console)
+        with console.status("[yellow]Measuring orphaned dependencies...[/yellow]"):
+            df = build_orphans_dataframe(metadata, prefix)
+
+        display.render_orphans(df)
+
+
+@app.command()
+def cleanup() -> None:
+    """List old package versions still taking up space in the Cellar."""
+    with handle_pipeline_errors():
+        prefix, metadata, _ = load_ecosystem_context(ExportSource.installed, console)
+        with console.status("[yellow]Measuring old versions...[/yellow]"):
+            df = build_cleanup_dataframe(metadata, prefix)
+
+        display.render_cleanup(df)
+
+
+def read_snapshot(path: Path) -> pd.DataFrame:
+    """Load an `export` snapshot, choosing the parser by file extension."""
+    try:
+        if path.suffix.lower() == ".csv":
+            return pd.read_csv(path)
+        return pd.read_json(path, orient="records")
+    except (OSError, ValueError) as e:
+        raise ValueError(f"Could not read snapshot '{path}': {e}") from e
+
+
+@app.command()
+def diff(
+    old: Path = typer.Argument(..., help="The earlier `export` snapshot."),
+    new: Path = typer.Argument(..., help="The later `export` snapshot."),
+    top_n: int = typer.Option(
+        20, "--top", "-n", min=1, help="Number of packages to display."
+    ),
+) -> None:
+    """Compare two snapshots made with `export` to see what grew or shrank."""
+    with handle_pipeline_errors():
+        before, after = read_snapshot(old), read_snapshot(new)
+        df = diff_snapshots(before, after)
+        display.render_diff(
+            df,
+            top_n=top_n,
+            old_total=before["Core_Bytes"].sum(),
+            new_total=after["Core_Bytes"].sum(),
+        )
 
 
 if __name__ == "__main__":

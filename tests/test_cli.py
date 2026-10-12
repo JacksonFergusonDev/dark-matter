@@ -1,5 +1,6 @@
 import json
 
+import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
@@ -277,3 +278,101 @@ def test_export_catalog_csv(mocker, mock_brew_metadata):
     result = runner.invoke(app, ["export", "--source", "catalog"])
     assert result.exit_code == 0
     assert result.stdout.splitlines() == ["Package,Bloat_Ratio", "pkg-a,2.0"]
+
+
+@pytest.fixture
+def installed_context(mocker, mock_brew_metadata):
+    """Serve the mock installation to installed-mode commands."""
+    mocker.patch("dark_matter_cli.cli.get_brew_prefix", return_value="/opt/homebrew")
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_metadata", return_value=mock_brew_metadata
+    )
+
+
+def test_reclaim_command(mocker, installed_context):
+    """Verify reclaim deduplicates targets and renders the result."""
+    from dark_matter_cli.core import Reclaim
+
+    result_obj = Reclaim(freed=pd.DataFrame(), blocked={"pkg-d": ["pkg-b"]})
+    build = mocker.patch(
+        "dark_matter_cli.cli.build_reclaim_dataframe", return_value=result_obj
+    )
+    render = mocker.patch("dark_matter_cli.display.render_reclaim")
+
+    result = runner.invoke(app, ["reclaim", "pkg-a", "pkg-d", "pkg-a"])
+
+    assert result.exit_code == 0
+    assert build.call_args.args[2] == ["pkg-a", "pkg-d"]
+    render.assert_called_once_with(
+        result_obj.freed, {"pkg-d": ["pkg-b"]}, ["pkg-a", "pkg-d"]
+    )
+
+
+def test_reclaim_unknown_package_errors(installed_context):
+    """Verify reclaim exits non-zero for packages that aren't installed."""
+    result = runner.invoke(app, ["reclaim", "nope"])
+    assert result.exit_code == 1
+    assert "not found in the local installation" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("command", "builder", "renderer"),
+    [
+        ("orphans", "build_orphans_dataframe", "render_orphans"),
+        ("cleanup", "build_cleanup_dataframe", "render_cleanup"),
+    ],
+)
+def test_installed_report_commands(
+    mocker, installed_context, command, builder, renderer
+):
+    """Verify orphans and cleanup build from the installation and render."""
+    build = mocker.patch(f"dark_matter_cli.cli.{builder}", return_value="df")
+    render = mocker.patch(f"dark_matter_cli.display.{renderer}")
+
+    result = runner.invoke(app, [command])
+
+    assert result.exit_code == 0
+    assert build.call_args.args[1] == "/opt/homebrew"
+    render.assert_called_once_with("df")
+
+
+def test_explain_tree_flag(mocker, installed_context):
+    """Verify --tree switches explain to the tree renderer."""
+    mocker.patch("dark_matter_cli.cli.build_explain_analysis_dataframe")
+    tree = mocker.patch("dark_matter_cli.display.render_explain_tree")
+    table = mocker.patch("dark_matter_cli.display.render_explain_table")
+
+    result = runner.invoke(app, ["explain", "pkg-a", "--tree"])
+
+    assert result.exit_code == 0
+    tree.assert_called_once()
+    table.assert_not_called()
+
+
+def test_diff_command(mocker, tmp_path):
+    """Verify diff reads CSV and JSON exports and reports totals."""
+    old = tmp_path / "old.csv"
+    old.write_text("Package,Core_Bytes,Weighted_Bytes\na,10,20\n")
+    new = tmp_path / "new.json"
+    new.write_text(
+        json.dumps([{"Package": "a", "Core_Bytes": 30, "Weighted_Bytes": 40}])
+    )
+    render = mocker.patch("dark_matter_cli.display.render_diff")
+
+    result = runner.invoke(app, ["diff", str(old), str(new), "-n", "3"])
+
+    assert result.exit_code == 0
+    df = render.call_args.args[0]
+    assert list(df["Core_Delta"]) == [20]
+    assert render.call_args.kwargs == {"top_n": 3, "old_total": 10, "new_total": 30}
+
+
+def test_diff_unreadable_snapshot(tmp_path):
+    """Verify a missing or malformed snapshot is a clean pipeline error."""
+    bad = tmp_path / "bad.json"
+    bad.write_text("not json")
+
+    result = runner.invoke(app, ["diff", str(bad), str(tmp_path / "missing.csv")])
+
+    assert result.exit_code == 1
+    assert "Could not read snapshot" in result.stdout

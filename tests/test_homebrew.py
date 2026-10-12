@@ -529,3 +529,62 @@ def test_fetch_ghcr_token_success(mocker):
         ("scope", "repository:homebrew/core/a:pull"),
         ("scope", "repository:homebrew/core/b:pull"),
     ]
+
+
+def _make_rack(prefix, name, kegs):
+    """Create Cellar/<name>/<version>/payload files of the given sizes."""
+    for version, size in kegs.items():
+        keg = prefix / "Cellar" / name / version
+        keg.mkdir(parents=True)
+        (keg / "payload").write_bytes(b"x" * size)
+
+
+def test_get_keg_sizes_follows_opt_link(tmp_path):
+    """Verify the opt link picks the current keg and the rest are stale."""
+    _make_rack(tmp_path, "foo", {"1.0": 10, "2.0": 20, "2.0_1": 30})
+    (tmp_path / "opt").mkdir()
+    (tmp_path / "opt" / "foo").symlink_to("../Cellar/foo/2.0_1")
+
+    kegs = homebrew.get_keg_sizes({"name": "foo"}, tmp_path)
+    assert kegs == homebrew.KegSizes(current=30, stale={"1.0": 10, "2.0": 20})
+
+
+@pytest.mark.parametrize(
+    "formula",
+    [
+        {"name": "foo", "linked_keg": "2.0"},
+        {"name": "foo", "installed": [{"version": "1.0"}, {"version": "2.0"}]},
+    ],
+)
+def test_get_keg_sizes_without_opt_link(tmp_path, formula):
+    """Verify the linked keg, then the newest installed version, are used."""
+    _make_rack(tmp_path, "foo", {"1.0": 10, "2.0": 20})
+
+    kegs = homebrew.get_keg_sizes(formula, tmp_path)
+    assert kegs == homebrew.KegSizes(current=20, stale={"1.0": 10})
+
+
+@pytest.mark.parametrize(
+    "formula", [{"name": "foo"}, {"name": "foo", "linked_keg": "9.9"}]
+)
+def test_get_keg_sizes_unknown_current_counts_everything(tmp_path, formula):
+    """Verify nothing is called stale when the current keg can't be found."""
+    _make_rack(tmp_path, "foo", {"1.0": 10, "2.0": 20})
+
+    assert homebrew.get_keg_sizes(formula, tmp_path) == homebrew.KegSizes(current=30)
+
+
+def test_get_keg_sizes_ignores_foreign_opt_link(tmp_path):
+    """Verify an opt link pointing outside the formula's rack is ignored."""
+    _make_rack(tmp_path, "foo", {"1.0": 10})
+    (tmp_path / "opt").mkdir()
+    (tmp_path / "opt" / "foo").symlink_to(tmp_path)
+
+    kegs = homebrew.get_keg_sizes({"name": "foo", "linked_keg": "1.0"}, tmp_path)
+    assert kegs == homebrew.KegSizes(current=10)
+
+
+def test_get_keg_sizes_missing_rack(tmp_path):
+    """Verify a formula with no Cellar directory measures as empty."""
+    kegs = homebrew.get_keg_sizes({"name": "gone", "linked_keg": "1.0"}, tmp_path)
+    assert kegs == homebrew.KegSizes(current=0)

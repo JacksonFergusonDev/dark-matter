@@ -7,6 +7,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from dark_matter_cli import core
+from dark_matter_cli.homebrew import KegSizes
 
 
 def test_get_all_dependencies():
@@ -435,3 +436,223 @@ def test_attribution_conserves_mass(installation):
         roots["Weighted_Bytes"].sum(), sum(sizes.values()), rel_tol=1e-9
     )
     assert (roots["Weighted_Bytes"] >= roots["Core_Bytes"]).all()
+
+
+def _installed(name, deps=(), requested=True, recorded=()):
+    """Build an installed formula entry with a recorded keg."""
+    keg = {
+        "version": "1.0",
+        "installed_on_request": requested,
+        "runtime_dependencies": [{"full_name": d} for d in recorded],
+    }
+    return {"name": name, "dependencies": list(deps), "installed": [keg]}
+
+
+@pytest.fixture
+def sized(mocker):
+    """Measure each package from a name-to-bytes map."""
+
+    def use(sizes):
+        mocker.patch(
+            "dark_matter_cli.core._resolve_physical_sizes",
+            side_effect=lambda pkgs, _: {n: sizes[n] for n in pkgs},
+        )
+
+    return use
+
+
+def test_recorded_dependencies_extend_closures():
+    """Verify a keg's recorded runtime deps count even if the formula dropped them."""
+    metadata = {
+        "formulae": [
+            _installed("app", recorded=["homebrew/core/old-lib"]),
+            {
+                "name": "old-lib",
+                "full_name": "homebrew/core/old-lib",
+                "dependencies": [],
+            }
+            | {"installed": [{"installed_on_request": False}]},
+        ]
+    }
+    topo = core._build_global_topology(metadata, catalog=False)
+
+    assert topo.graph["app"] == []
+    assert topo.trans_deps["app"] == {"old-lib"}
+    assert topo.roots == {"app"}
+
+
+def test_reclaim_frees_exclusive_dependencies(sized):
+    """Verify only dependencies no other root needs are freed."""
+    sized({"app": 10, "only": 20, "shared": 40})
+    metadata = {
+        "formulae": [
+            _installed("app", ["only", "shared"]),
+            _installed("other", ["shared"]),
+            _installed("only", requested=False),
+            _installed("shared", requested=False),
+        ]
+    }
+
+    result = core.build_reclaim_dataframe(metadata, Path("/brew"), ["app"])
+
+    assert list(result.freed["Package"]) == ["only", "app"]
+    assert list(result.freed["Is_Target"]) == [False, True]
+    assert result.blocked == {}
+
+
+def test_reclaim_reports_blocked_targets(sized):
+    """Verify targets other packages need are kept, naming their dependents."""
+    sized({"app": 10})
+    metadata = {
+        "formulae": [
+            _installed("app"),
+            _installed("x", ["lib"]),
+            _installed("y", recorded=["lib"]),
+            _installed("lib"),
+        ]
+    }
+
+    result = core.build_reclaim_dataframe(metadata, Path("/brew"), ["lib", "app"])
+
+    assert result.blocked == {"lib": ["x"]}
+    assert list(result.freed["Package"]) == ["app"]
+
+
+def test_reclaim_unknown_package(mock_brew_metadata):
+    """Verify reclaim rejects packages that aren't installed."""
+    with pytest.raises(core.PackageNotFoundError):
+        core.build_reclaim_dataframe(mock_brew_metadata, Path("/brew"), ["nope"])
+
+
+def test_reclaim_nothing_freed_has_columns(sized):
+    """Verify an empty result still has the expected columns."""
+    sized({})
+    metadata = {"formulae": [_installed("x", ["lib"]), _installed("lib")]}
+
+    result = core.build_reclaim_dataframe(metadata, Path("/brew"), ["lib"])
+    assert result.freed.empty
+    assert list(result.freed.columns) == ["Package", "Core_Bytes", "Is_Target"]
+
+
+def test_orphans_match_autoremove(sized):
+    """Verify orphans are deps no requested package reaches, recorded deps included."""
+    sized({"o": 5, "p": 7})
+    metadata = {
+        "formulae": [
+            _installed("app", recorded=["kept-by-record"]),
+            _installed("kept-by-record", requested=False),
+            _installed("o", ["p"], requested=False),
+            _installed("p", requested=False),
+        ],
+        "casks": [{"token": "some-app", "depends_on": {"formula": ["cask-dep"]}}],
+    }
+    metadata["formulae"].append(_installed("cask-dep", requested=False))
+
+    df = core.build_orphans_dataframe(metadata, Path("/brew"))
+
+    assert list(df["Package"]) == ["p", "o"]
+    assert list(df["Required_By"]) == [["o"], []]
+
+
+def test_cleanup_lists_stale_kegs(mocker):
+    """Verify each stale keg becomes a row, largest first."""
+    sizes = {
+        "a": KegSizes(current=1, stale={"1.0": 5}),
+        "b": KegSizes(current=1, stale={"0.9": 50, "0.8": 5}),
+        "c": KegSizes(current=1),
+    }
+    mocker.patch(
+        "dark_matter_cli.homebrew.get_keg_sizes",
+        side_effect=lambda f, _: sizes[f["name"]],
+    )
+    metadata = {"formulae": [{"name": n} for n in sizes]}
+
+    df = core.build_cleanup_dataframe(metadata, Path("/brew"))
+
+    assert df.to_dict("records") == [
+        {"Package": "b", "Version": "0.9", "Bytes": 50},
+        {"Package": "a", "Version": "1.0", "Bytes": 5},
+        {"Package": "b", "Version": "0.8", "Bytes": 5},
+    ]
+
+
+def test_cleanup_none(mocker):
+    """Verify an installation without stale kegs yields an empty frame."""
+    mocker.patch(
+        "dark_matter_cli.homebrew.get_keg_sizes",
+        return_value=KegSizes(current=1),
+    )
+    df = core.build_cleanup_dataframe({"formulae": [{"name": "a"}]}, Path("/b"))
+    assert df.empty
+
+
+def test_physical_sizes_exclude_stale_kegs(mocker):
+    """Verify a formula's core size is its current keg only."""
+    mocker.patch(
+        "dark_matter_cli.homebrew.get_keg_sizes",
+        return_value=KegSizes(current=10, stale={"0.9": 99}),
+    )
+    assert core._resolve_physical_sizes({"a": {"name": "a"}}, Path("/b")) == {"a": 10}
+
+
+def _snapshot(rows):
+    return pd.DataFrame(rows, columns=["Package", "Core_Bytes", "Weighted_Bytes"])
+
+
+def test_diff_snapshots():
+    """Verify added, removed, and changed packages are reported, unchanged ones not."""
+    old = _snapshot([("same", 5, 9), ("grew", 10, 20), ("gone", 3, 4)])
+    new = _snapshot([("same", 5, 9), ("grew", 30, 45), ("new", 7, 8)])
+
+    df = core.diff_snapshots(old, new)
+
+    assert df.to_dict("records") == [
+        {
+            "Package": "grew",
+            "Status": "changed",
+            "Old_Core": 10.0,
+            "New_Core": 30.0,
+            "Core_Delta": 20.0,
+            "Weighted_Delta": 25.0,
+        },
+        {
+            "Package": "new",
+            "Status": "added",
+            "Old_Core": 0.0,
+            "New_Core": 7.0,
+            "Core_Delta": 7.0,
+            "Weighted_Delta": 8.0,
+        },
+        {
+            "Package": "gone",
+            "Status": "removed",
+            "Old_Core": 3.0,
+            "New_Core": 0.0,
+            "Core_Delta": -3.0,
+            "Weighted_Delta": -4.0,
+        },
+    ]
+
+
+def test_diff_snapshots_requires_export_columns():
+    """Verify snapshots missing size columns are rejected with a hint."""
+    with pytest.raises(ValueError, match="old snapshot is missing Weighted_Bytes"):
+        core.diff_snapshots(
+            pd.DataFrame({"Package": [], "Core_Bytes": []}), _snapshot([])
+        )
+
+
+def test_explain_required_by_falls_back_to_target():
+    """Verify deps known only from a keg record hang off the target."""
+    metadata = {
+        "formulae": [
+            _installed("app", ["lib"], recorded=["lib", "ghost"]),
+            _installed("lib", requested=False),
+            _installed("ghost", requested=False),
+        ]
+    }
+    topo = core._build_global_topology(metadata, catalog=False)
+    df = core._compute_explain_metrics("app", {}, topo, is_theoretical=False)
+
+    required_by = dict(zip(df["Dependency"], df["Required_By"], strict=True))
+    assert required_by == {"lib": ["app"], "ghost": ["app"]}

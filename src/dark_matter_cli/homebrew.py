@@ -8,6 +8,7 @@ import sys
 import tempfile
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -178,6 +179,71 @@ def get_path_size(path: Path) -> int:
         return path.stat().st_size if path.is_file() else 0
     except OSError:
         return 0
+
+
+@dataclass(frozen=True)
+class KegSizes:
+    """A formula's footprint in the Cellar, split by keg.
+
+    Attributes:
+        current: Bytes in the keg Homebrew currently uses.
+        stale: Bytes in each older keg `brew cleanup` would remove, by version.
+    """
+
+    current: int
+    stale: dict[str, int] = field(default_factory=dict)
+
+
+def _current_keg(formula: dict[str, Any], prefix: Path) -> str | None:
+    """Identify the keg (version directory) Homebrew currently uses.
+
+    The `opt/<name>` link always points at the current keg, keg-only formulae
+    included. Without it, fall back to the linked keg, then the newest
+    installed version Homebrew reports.
+    """
+    name: str = formula["name"]
+    opt = prefix / "opt" / name
+    if opt.is_symlink():
+        target = opt.resolve()
+        if target.parent.name == name:
+            return target.name
+
+    if formula.get("linked_keg"):
+        return str(formula["linked_keg"])
+
+    installed = formula.get("installed") or []
+    version = installed[-1].get("version") if installed else None
+    return str(version) if version else None
+
+
+def get_keg_sizes(formula: dict[str, Any], prefix: Path) -> KegSizes:
+    """Measure a formula's current keg separately from any older kegs.
+
+    When the current keg can't be identified, the whole Cellar directory is
+    treated as current so nothing is reported as removable by mistake.
+
+    Args:
+        formula: A formula entry from `brew info --json=v2 --installed`.
+        prefix: The Homebrew installation prefix.
+
+    Returns:
+        KegSizes: The current keg's size and each stale keg's size.
+    """
+    rack = prefix / "Cellar" / formula["name"]
+    current = _current_keg(formula, prefix)
+    try:
+        kegs = sorted(p for p in rack.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        kegs = []
+
+    if current is None or current not in {k.name for k in kegs}:
+        return KegSizes(current=get_directory_size(rack))
+
+    sizes = {k.name: get_directory_size(k) for k in kegs}
+    return KegSizes(
+        current=sizes.pop(current),
+        stale=sizes,
+    )
 
 
 # Where casks install apps when Homebrew does not report a resolved target.
