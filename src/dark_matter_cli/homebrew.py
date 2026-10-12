@@ -1,8 +1,10 @@
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
+import sys
 import tempfile
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -16,6 +18,34 @@ logger = logging.getLogger("dark_matter_cli")
 _BREW_NOT_FOUND = "Homebrew (`brew`) was not found on PATH. Is Homebrew installed?"
 
 
+def _run_brew(args: list[str], failure: str) -> str:
+    """Run a brew subcommand and return its stdout.
+
+    Args:
+        args: Arguments passed to the brew executable.
+        failure: Message prefix used if the command exits non-zero.
+
+    Returns:
+        str: The command's standard output.
+
+    Raises:
+        RuntimeError: If brew is not installed or the command fails.
+    """
+    try:
+        result = subprocess.run(
+            ["brew", *args],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(_BREW_NOT_FOUND) from e
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(f"{failure}: {e.stderr}") from e
+
+    return result.stdout
+
+
 def get_brew_prefix() -> Path:
     """Retrieve the local Homebrew installation prefix.
 
@@ -25,18 +55,20 @@ def get_brew_prefix() -> Path:
     Raises:
         RuntimeError: If the brew prefix command fails.
     """
-    try:
-        result = subprocess.run(
-            ["brew", "--prefix"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        return Path(result.stdout.strip())
-    except FileNotFoundError as e:
-        raise RuntimeError(_BREW_NOT_FOUND) from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to resolve Homebrew prefix: {e.stderr}") from e
+    return Path(_run_brew(["--prefix"], "Failed to resolve Homebrew prefix").strip())
+
+
+def get_brew_cache() -> Path:
+    """Retrieve Homebrew's cache directory, honoring HOMEBREW_CACHE.
+
+    Returns:
+        Path: The cache directory (e.g., ~/Library/Caches/Homebrew on macOS,
+            ~/.cache/Homebrew on Linux).
+
+    Raises:
+        RuntimeError: If the brew cache command fails.
+    """
+    return Path(_run_brew(["--cache"], "Failed to resolve Homebrew cache").strip())
 
 
 def get_brew_metadata() -> dict[str, Any]:
@@ -48,21 +80,47 @@ def get_brew_metadata() -> dict[str, Any]:
     Raises:
         RuntimeError: If the brew info command fails or returns invalid JSON.
     """
+    stdout = _run_brew(
+        ["info", "--json=v2", "--installed"], "Failed to execute brew API"
+    )
     try:
-        result = subprocess.run(
-            ["brew", "info", "--json=v2", "--installed"],
-            capture_output=True,
-            text=True,
-            check=True,
-        )
-        data: dict[str, Any] = json.loads(result.stdout)
-        return data
-    except FileNotFoundError as e:
-        raise RuntimeError(_BREW_NOT_FOUND) from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"Failed to execute brew API: {e.stderr}") from e
+        data: dict[str, Any] = json.loads(stdout)
     except json.JSONDecodeError as e:
         raise RuntimeError("Failed to parse Homebrew JSON output.") from e
+    return data
+
+
+# Homebrew bottle tags by macOS major version.
+_MACOS_CODENAMES = {
+    11: "big_sur",
+    12: "monterey",
+    13: "ventura",
+    14: "sonoma",
+    15: "sequoia",
+    26: "tahoe",
+}
+
+
+def detect_bottle_tag() -> str:
+    """Infer the Homebrew bottle tag for the current machine.
+
+    Unknown macOS releases map to the newest known codename at or below them,
+    mirroring how Homebrew falls back to bottles built for older systems.
+
+    Returns:
+        str: A bottle tag such as 'arm64_tahoe', 'sequoia', or 'x86_64_linux'.
+    """
+    is_arm = platform.machine().lower() in {"arm64", "aarch64"}
+
+    if sys.platform != "darwin":
+        return "arm64_linux" if is_arm else "x86_64_linux"
+
+    release = platform.mac_ver()[0]
+    major = int(release.split(".")[0]) if release else max(_MACOS_CODENAMES)
+    eligible = [v for v in _MACOS_CODENAMES if v <= major] or [min(_MACOS_CODENAMES)]
+    codename = _MACOS_CODENAMES[max(eligible)]
+
+    return f"arm64_{codename}" if is_arm else codename
 
 
 def get_directory_size(path: Path) -> int:
@@ -130,38 +188,34 @@ def _load_api_cache(json_path: Path, jws_path: Path) -> list[dict[str, Any]]:
     return []
 
 
-def get_theoretical_catalog(prefix: Path) -> dict[str, list[dict[str, Any]]]:
+def get_theoretical_catalog(
+    api_dir: Path | None = None,
+) -> dict[str, list[dict[str, Any]]]:
     """Directly ingests Homebrew's local API JSON caches, bypassing the CLI entirely.
 
     Args:
-        prefix: The base physical installation path for Homebrew.
+        api_dir: The directory holding Homebrew's API cache. Defaults to the
+            `api` folder inside `brew --cache`.
 
     Returns:
         dict: A dictionary containing 'formulae' and 'casks' lists.
+
+    Raises:
+        RuntimeError: If no API cache is present.
     """
-    # Standard location where Homebrew mirrors its online API cache locally
-    cache_dir = Path.home() / "Library/Caches/Homebrew/api"
+    if api_dir is None:
+        api_dir = get_brew_cache() / "api"
 
-    formula_api_path = cache_dir / "formula.json"
-    formula_jws_path = cache_dir / "formula.jws.json"
-
-    cask_api_path = cache_dir / "cask.json"
-    cask_jws_path = cache_dir / "cask.jws.json"
-
-    # Fallback to internal cellar var paths if user settings vary
-    if not formula_jws_path.exists() and not formula_api_path.exists():
-        formula_api_path = prefix / "var/homebrew/api/formula.json"
-        formula_jws_path = prefix / "var/homebrew/api/formula.jws.json"
-        cask_api_path = prefix / "var/homebrew/api/cask.json"
-        cask_jws_path = prefix / "var/homebrew/api/cask.jws.json"
+    formula_api_path = api_dir / "formula.json"
+    formula_jws_path = api_dir / "formula.jws.json"
 
     if not formula_jws_path.exists() and not formula_api_path.exists():
         raise RuntimeError(
-            "Local Homebrew API cache not found. Please run `brew update` first."
+            f"Homebrew API cache not found in {api_dir}. Please run `brew update` first."
         )
 
     formulae = _load_api_cache(formula_api_path, formula_jws_path)
-    casks = _load_api_cache(cask_api_path, cask_jws_path)
+    casks = _load_api_cache(api_dir / "cask.json", api_dir / "cask.jws.json")
 
     return {"formulae": formulae, "casks": casks}
 

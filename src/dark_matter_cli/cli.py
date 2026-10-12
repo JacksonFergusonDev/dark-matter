@@ -32,6 +32,10 @@ console = Console()
 
 state = {"verbose": False}
 
+ARCH_HELP = (
+    "Target bottle tag (e.g. arm64_tahoe, x86_64_linux). Defaults to this machine's."
+)
+
 
 class ExportFormat(StrEnum):
     """Supported serialized output formats for the export command."""
@@ -79,7 +83,7 @@ def load_ecosystem_context(
     else:
         msg = target_msg or "[yellow]Computing theoretical ecosystem DAG...[/yellow]"
         with active_console.status(msg):
-            metadata = get_theoretical_catalog(prefix)
+            metadata = get_theoretical_catalog()
 
     return prefix, metadata, is_theoretical
 
@@ -146,9 +150,7 @@ def leaderboard(
     top_n: int = typer.Option(
         20, "--top", "-n", min=1, help="Number of packages to display."
     ),
-    arch: str = typer.Option(
-        "arm64_tahoe", "--arch", "-a", help="Target architecture."
-    ),
+    arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
 ) -> None:
     """Evaluate the complete theoretical ecosystem leaderboard."""
     console.print("[bold cyan]Accessing local ecosystem cache...[/bold cyan]")
@@ -168,7 +170,7 @@ def leaderboard(
 def inspect(
     package: str = typer.Argument(..., help="The specific package to analyze."),
     source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
-    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
+    arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
 ) -> None:
     """Evaluate the bloat of a single target package."""
     console.print(f"[bold cyan]Inspecting bloat for '{package}'...[/bold cyan]")
@@ -204,7 +206,7 @@ def compare(
         SortKey.ratio, "--sort", "-s", help="Sorting metric."
     ),
     source: ExportSource = typer.Option(ExportSource.installed, "--source"),
-    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
+    arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
 ) -> None:
     """Evaluate and compare the bloat of multiple packages."""
     pkg_list_str = ", ".join(packages)
@@ -236,7 +238,7 @@ def compare(
 def export(
     source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
     export_format: ExportFormat = typer.Option(ExportFormat.csv, "--format", "-f"),
-    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
+    arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
 ) -> None:
     """Export the computed bloat analysis dataframe for external pipelines."""
     err_console = Console(stderr=True)
@@ -263,7 +265,7 @@ def export(
 def explain(
     package: str = typer.Argument(..., help="The specific package to analyze."),
     source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
-    arch: str = typer.Option("arm64_tahoe", "--arch", "-a"),
+    arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
 ) -> None:
     """Break down the bloat of a package by its dependencies."""
     console.print(

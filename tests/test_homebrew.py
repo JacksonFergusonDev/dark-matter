@@ -232,3 +232,49 @@ def test_save_bottle_size_cache_unwritable(cache_path, mocker, caplog):
     mocker.patch("tempfile.NamedTemporaryFile", side_effect=OSError("read-only"))
     homebrew.save_bottle_size_cache({"a": 1})
     assert "Could not write bottle size cache" in caplog.text
+
+
+def test_get_brew_cache(mocker):
+    """Verify cache directory extraction from `brew --cache`."""
+    run = mocker.patch("subprocess.run")
+    run.return_value.stdout = "/home/user/.cache/Homebrew\n"
+
+    assert homebrew.get_brew_cache() == Path("/home/user/.cache/Homebrew")
+    assert run.call_args.args[0] == ["brew", "--cache"]
+
+
+@pytest.mark.parametrize(
+    ("system", "machine", "mac_release", "expected"),
+    [
+        ("darwin", "arm64", "26.6.2", "arm64_tahoe"),
+        ("darwin", "x86_64", "15.1", "sequoia"),
+        ("darwin", "arm64", "27.0", "arm64_tahoe"),
+        ("darwin", "arm64", "10.15", "arm64_big_sur"),
+        ("linux", "x86_64", "", "x86_64_linux"),
+        ("linux", "aarch64", "", "arm64_linux"),
+    ],
+)
+def test_detect_bottle_tag(mocker, system, machine, mac_release, expected):
+    """Verify bottle tags across platforms, CPUs, and unknown macOS releases."""
+    mocker.patch("sys.platform", system)
+    mocker.patch("platform.machine", return_value=machine)
+    mocker.patch("platform.mac_ver", return_value=(mac_release, ("", "", ""), ""))
+
+    assert homebrew.detect_bottle_tag() == expected
+
+
+def test_get_theoretical_catalog_uses_brew_cache(mocker, tmp_path):
+    """Verify the catalog is located via `brew --cache` when no dir is given."""
+    api_dir = tmp_path / "api"
+    api_dir.mkdir()
+    (api_dir / "formula.json").write_text(json.dumps([{"name": "wget"}]))
+    mocker.patch("dark_matter_cli.homebrew.get_brew_cache", return_value=tmp_path)
+
+    catalog = homebrew.get_theoretical_catalog()
+    assert catalog == {"formulae": [{"name": "wget"}], "casks": []}
+
+
+def test_get_theoretical_catalog_missing(tmp_path):
+    """Verify a missing cache names the searched directory."""
+    with pytest.raises(RuntimeError, match=str(tmp_path)):
+        homebrew.get_theoretical_catalog(tmp_path)
