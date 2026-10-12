@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -431,3 +432,78 @@ def test_load_api_cache_plain_json(tmp_path):
 
     json_file.write_text(json.dumps({"name": "wget"}))
     assert homebrew._load_api_cache(json_file, tmp_path / "missing") == []
+
+
+def test_get_path_size(tmp_path):
+    """Verify files, directories, symlinks, and missing paths are measured correctly."""
+    app = tmp_path / "Foo.app"
+    app.mkdir()
+    (app / "bin").write_bytes(b"x" * 30)
+    font = tmp_path / "Font.otf"
+    font.write_bytes(b"x" * 7)
+    link = tmp_path / "foo"
+    link.symlink_to(app / "bin")
+
+    assert homebrew.get_path_size(app) == 30
+    assert homebrew.get_path_size(font) == 7
+    assert homebrew.get_path_size(link) == 0
+    assert homebrew.get_path_size(tmp_path / "missing") == 0
+
+
+def test_get_directory_size_skips_unreadable_entries(tmp_path, mocker):
+    """Verify one failing entry doesn't discard its siblings."""
+    (tmp_path / "ok.bin").write_bytes(b"x" * 5)
+    (tmp_path / "bad.bin").write_bytes(b"x" * 9)
+
+    real_stat = os.DirEntry.stat
+
+    def flaky_stat(entry, *args, **kwargs):
+        if entry.name == "bad.bin":
+            raise FileNotFoundError(entry.path)
+        return real_stat(entry, *args, **kwargs)
+
+    mocker.patch.object(os.DirEntry, "stat", flaky_stat)
+    assert homebrew.get_directory_size(tmp_path) == 5
+
+
+def test_get_cask_size_uses_resolved_targets(tmp_path):
+    """Verify Homebrew 7 artifact targets are measured, skipping symlinks."""
+    prefix = tmp_path / "brew"
+    caskroom = prefix / "Caskroom" / "brave-browser" / "1.0"
+    caskroom.mkdir(parents=True)
+    (caskroom / "meta.json").write_bytes(b"x" * 3)
+
+    app = tmp_path / "Applications" / "Brave Browser.app"
+    app.mkdir(parents=True)
+    (app / "binary").write_bytes(b"x" * 100)
+    link = prefix / "bin" / "brave"
+    link.parent.mkdir()
+    link.symlink_to(app / "binary")
+
+    cask = {
+        "token": "brave-browser",
+        "artifacts": [
+            {"app": ["Brave Browser.app"], "target": str(app)},
+            {"binary": [str(app / "binary")], "target": str(link)},
+            {"uninstall": [{"quit": "com.brave.Browser"}]},
+            "unexpected",
+        ],
+    }
+    assert homebrew.get_cask_size(cask, prefix) == 103
+
+
+def test_cask_artifact_paths_infers_legacy_app_locations():
+    """Verify app paths are inferred when Homebrew omits resolved targets."""
+    cask = {
+        "artifacts": [
+            {"app": ["qbittorrent.app", {"target": "qBittorrent.app"}]},
+            {"suite": ["Adobe Suite"]},
+            {"app": ["Absolute.app", {"target": "/Opt/Absolute.app"}]},
+            {"pkg": ["Installer.pkg"]},
+        ]
+    }
+    assert homebrew._cask_artifact_paths(cask) == [
+        Path("/Applications/qBittorrent.app"),
+        Path("/Applications/Adobe Suite"),
+        Path("/Opt/Absolute.app"),
+    ]

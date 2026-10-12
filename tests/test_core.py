@@ -204,3 +204,40 @@ def test_theoretical_defaults_to_detected_tag(mocker, mock_brew_metadata):
 
     core.build_targeted_theoretical_dataframe(mock_brew_metadata, "pkg-a")
     assert resolve.call_args.args[0] == {"linux": "u-linux"}
+
+
+def test_topology_keys_casks_by_token_with_dependencies():
+    """Verify casks use their token, formula/cask deps, and avoid collisions."""
+    metadata = {
+        "formulae": [
+            {"name": "docker", "dependencies": []},
+            {"name": "ghostscript", "dependencies": []},
+        ],
+        "casks": [
+            {"token": "docker", "name": ["Docker Desktop"]},
+            {
+                "token": "mactex-no-gui",
+                "name": ["MacTeX"],
+                "depends_on": {"formula": ["ghostscript"], "cask": ["docker"]},
+            },
+        ],
+    }
+    graph, _, _, pkg_map = core._build_global_topology(metadata)
+
+    assert set(graph) == {"docker", "ghostscript", "docker (cask)", "mactex-no-gui"}
+    assert graph["mactex-no-gui"] == ["ghostscript", "docker"]
+    assert pkg_map["docker (cask)"]["token"] == "docker"
+
+
+def test_physical_sizes_route_casks_and_formulae(mocker):
+    """Verify formulae are measured in the Cellar and casks via their artifacts."""
+    dir_size = mocker.patch(
+        "dark_matter_cli.homebrew.get_directory_size", return_value=10
+    )
+    cask_size = mocker.patch("dark_matter_cli.homebrew.get_cask_size", return_value=99)
+    pkg_map = {"wget": {"name": "wget"}, "brave-browser": {"token": "brave-browser"}}
+
+    sizes = core._resolve_physical_sizes(pkg_map, Path("/brew"))
+    assert sizes == {"wget": 10, "brave-browser": 99}
+    dir_size.assert_called_once_with(Path("/brew/Cellar/wget"))
+    cask_size.assert_called_once_with({"token": "brave-browser"}, Path("/brew"))
