@@ -168,14 +168,6 @@ siblings-only = true
 [tool.rumdl.MD029]
 style = "one"
 
-# --- Per‑directory overrides for docs/ ---
-# Relax rules that conflict with Zensical / Python‑Markdown extensions
-[tool.rumdl.per-file-ignores]
-"docs/**/*.md" = [
-    "MD041", # first line need not be a top‑level heading
-    "MD046", # code block style – Zensical extensions require mixing fenced and indented blocks for admonitions/tabs
-]
-
 # ---- git-cliff ---- #
 # Release notes and changelog previews, generated from conventional commits.
 
