@@ -1,4 +1,5 @@
 import json
+import re
 
 import pandas as pd
 import pytest
@@ -403,7 +404,9 @@ def test_diff_unreadable_snapshot(tmp_path):
 def test_help_offers_completion_install():
     """Verify shell completion can be installed from the CLI."""
     result = runner.invoke(app, ["--help"])
-    assert "--install-completion" in result.stdout
+    # Rich styles help output when it detects CI, splitting the option name.
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", result.stdout)
+    assert "--install-completion" in plain
 
 
 def test_complete_installed_lists_formulae_and_casks(monkeypatch, tmp_path):
