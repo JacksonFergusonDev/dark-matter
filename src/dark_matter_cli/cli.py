@@ -1,4 +1,5 @@
 import contextlib
+import os
 import sys
 from collections.abc import Callable, Iterator
 from enum import StrEnum
@@ -33,7 +34,6 @@ from dark_matter_cli.logger import get_logger
 
 app = typer.Typer(
     help="Analyze dependency bloat and storage mass of macOS Homebrew installations.",
-    add_completion=False,
 )
 console = Console()
 
@@ -64,6 +64,25 @@ class ExportSource(StrEnum):
 
     installed = "installed"
     catalog = "catalog"
+
+
+def complete_installed(incomplete: str) -> list[str]:
+    """Shell-complete the names of installed formulae and casks.
+
+    Reads the Cellar and Caskroom directly so completion stays fast, and
+    offers nothing rather than an error when Homebrew can't be found.
+    """
+    try:
+        prefix = Path(os.environ.get("HOMEBREW_PREFIX") or get_brew_prefix())
+        names = {
+            entry.name
+            for rack in ("Cellar", "Caskroom")
+            if (prefix / rack).is_dir()
+            for entry in (prefix / rack).iterdir()
+        }
+    except (OSError, RuntimeError):
+        return []
+    return sorted(n for n in names if n.startswith(incomplete))
 
 
 @contextlib.contextmanager
@@ -242,7 +261,11 @@ def leaderboard(
 
 @app.command()
 def inspect(
-    package: str = typer.Argument(..., help="The specific package to analyze."),
+    package: str = typer.Argument(
+        ...,
+        help="The specific package to analyze.",
+        autocompletion=complete_installed,
+    ),
     source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
     arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
 ) -> None:
@@ -274,7 +297,11 @@ def inspect(
 
 @app.command()
 def compare(
-    packages: list[str] = typer.Argument(..., help="The specific packages to compare."),
+    packages: list[str] = typer.Argument(
+        ...,
+        help="The specific packages to compare.",
+        autocompletion=complete_installed,
+    ),
     sort_by: SortKey = typer.Option(
         SortKey.ratio, "--sort", "-s", help="Sorting metric."
     ),
@@ -340,7 +367,11 @@ def export(
 
 @app.command()
 def explain(
-    package: str = typer.Argument(..., help="The specific package to analyze."),
+    package: str = typer.Argument(
+        ...,
+        help="The specific package to analyze.",
+        autocompletion=complete_installed,
+    ),
     source: ExportSource = typer.Option(ExportSource.installed, "--source", "-s"),
     arch: str | None = typer.Option(None, "--arch", "-a", help=ARCH_HELP),
     tree: bool = typer.Option(
@@ -371,7 +402,9 @@ def explain(
 
 @app.command()
 def reclaim(
-    packages: list[str] = typer.Argument(..., help="The packages to uninstall."),
+    packages: list[str] = typer.Argument(
+        ..., help="The packages to uninstall.", autocompletion=complete_installed
+    ),
 ) -> None:
     """Measure the space freed by uninstalling packages and their unused deps."""
     packages = list(dict.fromkeys(packages))

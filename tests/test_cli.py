@@ -398,3 +398,33 @@ def test_diff_unreadable_snapshot(tmp_path):
 
     assert result.exit_code == 1
     assert "Could not read snapshot" in result.stdout
+
+
+def test_help_offers_completion_install():
+    """Verify shell completion can be installed from the CLI."""
+    result = runner.invoke(app, ["--help"])
+    assert "--install-completion" in result.stdout
+
+
+def test_complete_installed_lists_formulae_and_casks(monkeypatch, tmp_path):
+    """Verify completion offers installed formulae and casks by prefix."""
+    from dark_matter_cli.cli import complete_installed
+
+    for path in ("Cellar/wget", "Cellar/wavpack", "Cellar/jq", "Caskroom/warp"):
+        (tmp_path / path).mkdir(parents=True)
+    monkeypatch.setenv("HOMEBREW_PREFIX", str(tmp_path))
+
+    assert complete_installed("wa") == ["warp", "wavpack"]
+    assert complete_installed("") == ["jq", "warp", "wavpack", "wget"]
+
+
+def test_complete_installed_without_brew(mocker, monkeypatch):
+    """Verify completion offers nothing, rather than failing, without Homebrew."""
+    from dark_matter_cli.cli import complete_installed
+
+    monkeypatch.delenv("HOMEBREW_PREFIX", raising=False)
+    mocker.patch(
+        "dark_matter_cli.cli.get_brew_prefix", side_effect=RuntimeError("no brew")
+    )
+
+    assert complete_installed("w") == []
