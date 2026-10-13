@@ -66,3 +66,44 @@ jobs:
 
     - name: Run tests with coverage
       run: uv run pytest --cov
+
+  smoke:
+    name: Smoke test against Homebrew
+    runs-on: macos-latest
+    env:
+      HOMEBREW_NO_INSTALL_CLEANUP: "1"
+      HOMEBREW_NO_ENV_HINTS: "1"
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      with:
+        enable-cache: true
+        python-version: "3.14"
+
+    - name: Install dependencies
+      run: uv sync --locked
+
+    # A small formula with one dependency, so attribution has a graph to walk.
+    - name: Install a test formula
+      run: brew install watch
+
+    - name: Run installed-mode commands
+      run: |
+        uv run dark-matter --verbose analyze --top 5
+        uv run dark-matter inspect watch
+        uv run dark-matter explain watch --tree
+        uv run dark-matter reclaim watch
+        uv run dark-matter orphans
+        uv run dark-matter cleanup
+        uv run dark-matter export --format json > export.json
+
+    - name: Check the export
+      run: uv run python scripts/smoke_check.py export.json watch ncurses
+
+    - name: Run catalog-mode commands
+      run: |
+        uv run dark-matter inspect watch --source catalog
+        uv run dark-matter explain watch --source catalog
