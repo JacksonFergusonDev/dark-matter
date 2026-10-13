@@ -5,6 +5,8 @@ on:
     branches: [ "main" ]
   # Run on PRs targeting any branch so stacked PRs are checked too.
   pull_request:
+  # Lets the release workflow run the same checks before publishing.
+  workflow_call:
 
 permissions:
   contents: read
