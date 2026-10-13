@@ -231,7 +231,12 @@ just typecheck    # mypy
 just test         # pytest
 just test-cov     # pytest with coverage report
 just ci           # the full pipeline CI runs, locally
+just changelog    # preview release notes for unreleased commits
 ```
+
+## Changelog
+
+Release notes for every version are on the [Releases page](https://github.com/JacksonFergusonDev/dark-matter/releases). They're generated from commit messages by [git-cliff](https://git-cliff.org), configured under `[tool.git-cliff]` in `pyproject.toml`; `just changelog` previews the notes for unreleased changes.
 
 ## Contact
 

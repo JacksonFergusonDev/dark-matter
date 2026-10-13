@@ -175,3 +175,49 @@ style = "one"
     "MD041", # first line need not be a top‑level heading
     "MD046", # code block style – Zensical extensions require mixing fenced and indented blocks for admonitions/tabs
 ]
+
+# ---- git-cliff ---- #
+# Release notes and changelog previews, generated from conventional commits.
+
+[tool.git-cliff.changelog]
+body = """
+{% if version %}\
+    ## {{ version }} ({{ timestamp | date(format="%Y-%m-%d") }})
+{% else %}\
+    ## Unreleased
+{% endif %}\
+{% for group, commits in commits | group_by(attribute="group") %}
+    ### {{ group | striptags | trim | upper_first }}
+    {% for commit in commits %}
+        - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
+          {{ commit.message | upper_first }}\
+    {% endfor %}
+{% endfor %}\
+{% if previous.version and version %}
+    **Full changelog:** [{{ previous.version }}...{{ version }}](https://github.com/JacksonFergusonDev/dark-matter/compare/{{ previous.version }}...{{ version }})
+{% endif %}
+"""
+trim = true
+
+[tool.git-cliff.git]
+conventional_commits = true
+filter_unconventional = true
+tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
+sort_commits = "oldest"
+# Link the "(#N)" that squash merges append to each commit.
+commit_preprocessors = [
+    { pattern = '\(#(\d+)\)', replace = "([#${1}](https://github.com/JacksonFergusonDev/dark-matter/pull/${1}))" },
+]
+# The HTML comments only order the groups; they're stripped from the output.
+commit_parsers = [
+    { message = "^chore: bump version", skip = true },
+    { message = "^chore\\(deps", skip = true },
+    { message = "^feat", group = "<!-- 0 -->Features" },
+    { message = "^fix", group = "<!-- 1 -->Bug fixes" },
+    { message = "^perf", group = "<!-- 2 -->Performance" },
+    { message = "^refactor", group = "<!-- 3 -->Refactoring" },
+    { message = "^docs", group = "<!-- 4 -->Documentation" },
+    { message = "^test", group = "<!-- 5 -->Testing" },
+    { message = "^(ci|build)", group = "<!-- 6 -->CI and packaging" },
+    { message = "^(chore|style)", group = "<!-- 7 -->Maintenance" },
+]
