@@ -148,6 +148,16 @@ When `inspect`, `compare`, or `explain` are pointed at packages that aren't inst
 
 Theoretical modes read the catalog Homebrew caches for the current platform, so run `brew update` first if it's missing. Formulae without a bottle for the platform count as 0, and so do bottles whose size couldn't be fetched from ghcr.io; Dark Matter warns when that happens, and the next run retries them. `--arch` defaults to this machine's bottle tag (e.g. `arm64_tahoe`, `x86_64_linux`).
 
+### Shell completion
+
+Tab completion covers subcommands, options, and the names of installed packages. Install it for your current shell (bash, zsh, fish, or PowerShell) with:
+
+```bash
+dark-matter --install-completion
+```
+
+Then restart your shell. `--show-completion` prints the script instead, if you'd rather add it to your shell config yourself.
+
 ### `analyze`
 
 | Flag | Default | Description |
