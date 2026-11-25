@@ -313,125 +313,26 @@ jobs:
           TAG: ${{ github.ref_name }}
         run: gh release create "$TAG" release-assets/* --verify-tag --title "$TAG" --notes-file RELEASE_NOTES.md
 
-  # Renders Formula/dark-matter.rb from the 4 Unix binary checksums.
-  # On a real tag push it pushes to JacksonFergusonDev/homebrew-tap;
-  # on a workflow_dispatch dry run it uploads the rendered formula as an artifact.
+  # Delegates formula rendering and tap push to ci-cd-release-infrastructure.
+  # On a workflow_dispatch dry run it uploads dry-run-formula without pushing.
   sync-homebrew:
     name: Update Homebrew formula
     needs: [verify, build-binaries, github-release]
     if: ${{ !failure() && !cancelled() && (github.event_name != 'push' || needs.github-release.result == 'success') }}
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 10
-    permissions: {}
-    env:
-      VERSION: ${{ needs.verify.outputs.version }}
-      DRY_RUN: ${{ github.event_name != 'push' }}
-      TAP_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
-    steps:
-      - name: Download Unix binary checksums
-        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          pattern: bin-*
-          path: ${{ runner.temp }}/bin
-          merge-multiple: true
-
-      - name: Render Formula/dark-matter.rb
-        run: |
-          read_sha() {
-            local file="${RUNNER_TEMP}/bin/dark-matter-v${VERSION}-${1}.tar.gz.sha256"
-            if [[ ! -s "$file" ]]; then
-              echo "::error::Missing checksum file: ${file}"
-              exit 1
-            fi
-            awk '{ print $1 }' "$file"
-          }
-
-          sha_darwin_arm64="$(read_sha aarch64-apple-darwin)"
-          sha_darwin_x64="$(read_sha x86_64-apple-darwin)"
-          sha_linux_arm64="$(read_sha aarch64-unknown-linux-gnu)"
-          sha_linux_x64="$(read_sha x86_64-unknown-linux-gnu)"
-
-          mkdir -p "${RUNNER_TEMP}/formula"
-          cat > "${RUNNER_TEMP}/formula/dark-matter.rb" <<EOF
-          # Written by dark-matter's release workflow (.github/workflows/release.yml).
-          # Edit the template there, not this file.
-          class DarkMatter < Formula
-            desc "Dependency-graph-aware storage profiler for Homebrew"
-            homepage "https://github.com/JacksonFergusonDev/dark-matter"
-            version "${VERSION}"
-            license "MIT"
-
-            head do
-              url "https://github.com/JacksonFergusonDev/dark-matter.git", branch: "main"
-              depends_on "rust" => :build
-            end
-
-            on_macos do
-              on_arm do
-                url "https://github.com/JacksonFergusonDev/dark-matter/releases/download/v${VERSION}/dark-matter-v${VERSION}-aarch64-apple-darwin.tar.gz"
-                sha256 "${sha_darwin_arm64}"
-              end
-              on_intel do
-                url "https://github.com/JacksonFergusonDev/dark-matter/releases/download/v${VERSION}/dark-matter-v${VERSION}-x86_64-apple-darwin.tar.gz"
-                sha256 "${sha_darwin_x64}"
-              end
-            end
-
-            on_linux do
-              on_arm do
-                url "https://github.com/JacksonFergusonDev/dark-matter/releases/download/v${VERSION}/dark-matter-v${VERSION}-aarch64-unknown-linux-gnu.tar.gz"
-                sha256 "${sha_linux_arm64}"
-              end
-              on_intel do
-                url "https://github.com/JacksonFergusonDev/dark-matter/releases/download/v${VERSION}/dark-matter-v${VERSION}-x86_64-unknown-linux-gnu.tar.gz"
-                sha256 "${sha_linux_x64}"
-              end
-            end
-
-            def install
-              if build.head?
-                system "cargo", "install", *std_cargo_args
-              else
-                bin.install "dark-matter"
-              end
-            end
-
-            test do
-              assert_match(/^dark-matter version \d+\.\d+\.\d+/, shell_output("#{bin}/dark-matter --version"))
-            end
-          end
-          EOF
-          cat "${RUNNER_TEMP}/formula/dark-matter.rb"
-
-      - name: Upload dry-run formula artifact
-        if: env.DRY_RUN == 'true'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dry-run-formula
-          path: ${{ runner.temp }}/formula/dark-matter.rb
-          if-no-files-found: error
-
-      - name: Warn when TAP_GITHUB_TOKEN is unset
-        if: env.DRY_RUN != 'true' && env.TAP_TOKEN == ''
-        run: echo "::warning::TAP_GITHUB_TOKEN isn't set, so the Homebrew formula wasn't updated."
-
-      - name: Checkout homebrew-tap
-        if: env.DRY_RUN != 'true' && env.TAP_TOKEN != ''
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: JacksonFergusonDev/homebrew-tap
-          token: ${{ secrets.TAP_GITHUB_TOKEN }}
-          path: tap
-          persist-credentials: true # zizmor: ignore[artipacked] the push below needs it; nothing uploads this checkout.
-
-      - name: Push updated formula to homebrew-tap
-        if: env.DRY_RUN != 'true' && env.TAP_TOKEN != ''
-        run: |
-          cp "${RUNNER_TEMP}/formula/dark-matter.rb" tap/Formula/dark-matter.rb
-          cd tap
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add Formula/dark-matter.rb
-          git diff --cached --quiet && exit 0
-          git commit -m "feat(dark-matter): update to ${VERSION}"
-          git push
+    permissions:
+      contents: read
+    uses: JacksonFergusonDev/ci-cd-release-infrastructure/.github/workflows/update-homebrew-binary.yml@2f79e0f1ed0d45b5582d3b11092fe21c1a61d396 # feat/rust-release-and-binary-homebrew
+    with:
+      tag: v${{ needs.verify.outputs.version }}
+      formula_path: Formula/dark-matter.rb
+      artifact_pattern: bin-*
+      archive_template: dark-matter-v{version}-{target}.tar.gz
+      targets: aarch64-apple-darwin,x86_64-apple-darwin,aarch64-unknown-linux-gnu,x86_64-unknown-linux-gnu
+      desc: Dependency-graph-aware storage profiler for Homebrew
+      homepage: https://github.com/JacksonFergusonDev/dark-matter
+      license: MIT
+      binary_name: dark-matter
+      version_pattern: '^dark-matter version \d+\.\d+\.\d+'
+      dry_run: ${{ github.event_name != 'push' }}
+    secrets:
+      TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
