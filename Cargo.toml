@@ -1,6 +1,6 @@
 [package]
 name = "dark-matter"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 description = "A dependency-graph-aware storage profiler for Homebrew."
 readme = "README.md"
