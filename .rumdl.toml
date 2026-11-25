@@ -1,0 +1,31 @@
+disable = [
+    "MD013", # line length - creates unnecessary diff churn
+    "MD033", # inline HTML - required for readme and parts of documentation
+    "MD077", # continuation line indentation - we intentionally use 4 spaces for visual clarity
+]
+
+# --- Heading style ---
+# Enforce ATX style (# Heading) exclusively; setext (underlined) headings are not allowed
+[MD003]
+style = "atx"
+
+# --- Unordered list style ---
+# Use dash (-) for list markers - cleaner than * or +, and reduces git diff noise
+[MD004]
+style = "dash"
+
+# --- Trailing spaces ---
+# Allow exactly 2 spaces for hard line breaks (Markdown standard); flag any other stray whitespace
+[MD009]
+br-spaces = 2
+strict = false
+
+# --- Duplicate headings ---
+# Allow identical subheadings (e.g., "Parameters") as long as they appear under different parent headings
+[MD024]
+siblings-only = true
+
+# --- Ordered list numbering ---
+# Use "one" style (1., 1., 1.) so reordering list items doesn't create massive diff churn
+[MD029]
+style = "one"

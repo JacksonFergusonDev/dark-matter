@@ -675,13 +675,12 @@ fn normalize_internal_cask(token: &str, cask: &Value) -> Cask {
     let name = obj
         .and_then(|m| m.get("names"))
         .and_then(Value::as_array)
-        .map(|arr| {
+        .map_or_default(|arr| {
             arr.iter()
                 .filter_map(Value::as_str)
                 .map(ToOwned::to_owned)
                 .collect()
-        })
-        .unwrap_or_default();
+        });
 
     let formula = match obj
         .and_then(|m| m.get("depends_on_args"))

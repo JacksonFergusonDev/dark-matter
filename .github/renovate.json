@@ -38,14 +38,14 @@
             "minimumReleaseAge": "2 weeks"
         },
         {
-            "description": "Group all python dev-dependencies (ruff, mypy, pytest) into one PR and automerge them.",
-            "matchFileNames": [
-                "pyproject.toml"
+            "description": "Group Rust dev-dependencies into one PR and automerge them.",
+            "matchManagers": [
+                "cargo"
             ],
             "matchDepTypes": [
-                "dependency-groups"
+                "dev-dependencies"
             ],
-            "groupName": "python-dev-tools",
+            "groupName": "rust-dev-deps",
             "automerge": true
         },
         {

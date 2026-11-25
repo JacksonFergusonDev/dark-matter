@@ -9,7 +9,6 @@ default_stages:
 fail_fast: true
 
 repos:
-  # Generic hooks (configured to IGNORE Python)
   - repo: builtin
     hooks:
       - id: check-added-large-files
@@ -18,64 +17,46 @@ repos:
       - id: check-symlinks
       - id: check-executables-have-shebangs
       - id: trailing-whitespace
-        exclude: \.py$
       - id: end-of-file-fixer
-        exclude: \.py$|\.gitkeep$
+        exclude: \.gitkeep$
       - id: check-yaml
       - id: check-json
       - id: check-toml
 
-  # Local Python + Markdown Toolchain (Managed via uv.lock)
+  # Local Rust + Markdown Toolchain
   - repo: local
     hooks:
-      - id: uv-lock-check
-        name: uv lock check
-        entry: uv lock --check
+      - id: cargo-fmt
+        name: cargo fmt
+        entry: cargo fmt --all -- --check
         language: system
+        types: [rust]
         pass_filenames: false
-        files: ^(pyproject\.toml|uv\.lock)$
 
-      - id: ruff-check
-        name: ruff check
-        entry: uv run ruff check --fix
+      - id: cargo-clippy
+        name: cargo clippy
+        entry: cargo clippy --all-targets -- -D warnings
         language: system
-        types: [python]
-        exclude: ^docs/
-        require_serial: true
-
-      - id: ruff-format
-        name: ruff format
-        entry: uv run ruff format
-        language: system
-        types: [python]
-        exclude: ^docs/
-        require_serial: true
-
-      - id: mypy
-        name: mypy
-        entry: uv run mypy
-        language: system
-        types: [python]
-        exclude: ^docs/
-        require_serial: true
+        types: [rust]
+        pass_filenames: false
 
       - id: rumdl-check
         name: rumdl check
-        entry: uv run rumdl check --fix
+        entry: rumdl check --fix
         language: system
         types: [markdown]
         require_serial: true
 
       - id: rumdl-fmt
         name: rumdl fmt
-        entry: uv run rumdl fmt
+        entry: rumdl fmt
         language: system
         types: [markdown]
         require_serial: true
 
-      - id: pytest-unit
-        name: pytest unit tests
-        entry: uv run pytest
+      - id: cargo-test
+        name: cargo test
+        entry: cargo test --all-targets
         language: system
         pass_filenames: false
         stages: [pre-push]

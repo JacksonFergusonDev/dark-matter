@@ -13,9 +13,117 @@ jobs:
     name: CI
     uses: ./.github/workflows/ci.yml
 
-  build-n-publish:
-    name: Build and publish to PyPI
+  build-binaries:
+    name: Build binary (${{ matrix.target }})
     needs: checks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      - name: Package tarball
+        env:
+          TAG: ${{ github.ref_name }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p dist-bin
+          ARCHIVE="dark-matter-${TAG}-${TARGET}.tar.gz"
+          tar -czf "dist-bin/${ARCHIVE}" -C "target/${TARGET}/release" dark-matter
+          if command -v sha256sum >/dev/null 2>&1; then
+            (cd dist-bin && sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256")
+          else
+            (cd dist-bin && shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256")
+          fi
+
+      - name: Upload binary archive
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f46cd9 # v7.0.2
+        with:
+          name: bin-${{ matrix.target }}
+          path: dist-bin/*
+
+  build-wheels:
+    name: Build PyPI wheel (${{ matrix.target }})
+    needs: checks
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            manylinux: off
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            manylinux: off
+          - os: ubuntu-latest
+            target: x86_64
+            manylinux: auto
+          - os: ubuntu-24.04-arm
+            target: aarch64
+            manylinux: auto
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build wheel with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+          manylinux: ${{ matrix.manylinux }}
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f46cd9 # v7.0.2
+        with:
+          name: wheels-${{ matrix.target }}
+          path: dist/*
+
+  build-sdist:
+    name: Build PyPI sdist
+    needs: checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Build sdist with maturin
+        uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f46cd9 # v7.0.2
+        with:
+          name: wheels-sdist
+          path: dist/*
+
+  publish-pypi:
+    name: Publish wheels to PyPI
+    needs: [build-wheels, build-sdist]
     runs-on: ubuntu-latest
     environment: release
     permissions:
@@ -24,36 +132,29 @@ jobs:
       attestations: write
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Download wheels and sdist
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          python-version: "3.14"
+          pattern: wheels-*
+          path: dist
+          merge-multiple: true
 
-      - name: Build distribution
-        run: uv build
-
-      - name: Attest build provenance
+      - name: Attest PyPI distributions
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: "dist/*"
-
-      - name: Upload distributions
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: dist
-          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@dc37677b2e1c63e2034f94d8a5b11f265b73ba33 # release/v1
 
   github-release:
     name: Create GitHub Release
-    needs: build-n-publish
+    needs: [build-binaries, publish-pypi]
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
 
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -61,27 +162,33 @@ jobs:
           # git-cliff needs the full history and tags to find this release's commits.
           fetch-depth: 0
 
-      - name: Install uv
+      - name: Install uv (for git-cliff)
         uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
       - name: Generate release notes
         run: uvx git-cliff@2.14.2 --latest --strip all --output RELEASE_NOTES.md
 
-      - name: Download distributions
+      - name: Download binary archives
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: dist
-          path: dist/
+          pattern: bin-*
+          path: release-assets
+          merge-multiple: true
+
+      - name: Attest binary archives
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: "release-assets/*.tar.gz"
 
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" dist/* --verify-tag --title "$TAG" --notes-file RELEASE_NOTES.md
+        run: gh release create "$TAG" release-assets/* --verify-tag --title "$TAG" --notes-file RELEASE_NOTES.md
 
   sync-homebrew:
     name: Delegate Homebrew Update
-    needs: build-n-publish
+    needs: github-release
     uses: JacksonFergusonDev/ci-cd-release-infrastructure/.github/workflows/update-homebrew.yml@cff447baf1076b8807502ab8da7d2f0867a973fc # main
     with:
       tag: ${{ github.ref_name }}

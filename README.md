@@ -15,9 +15,8 @@
 [![PyPI Version](https://img.shields.io/pypi/v/dark-matter-cli?style=flat-square&color=94a3b8&labelColor=0A0A0A&logo=pypi&logoColor=94a3b8)](https://pypi.org/project/dark-matter-cli/)
 [![CI](https://img.shields.io/github/actions/workflow/status/JacksonFergusonDev/dark-matter/ci.yml?style=flat-square&color=94a3b8&labelColor=0A0A0A&label=CI)](https://github.com/JacksonFergusonDev/dark-matter/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/actions/workflow/status/JacksonFergusonDev/dark-matter/release.yml?style=flat-square&color=94a3b8&labelColor=0A0A0A&label=Release)](https://github.com/JacksonFergusonDev/dark-matter/actions/workflows/release.yml)
-[![Python](https://img.shields.io/badge/python-3.12+-94a3b8?style=flat-square&labelColor=0A0A0A)](https://www.python.org/downloads/)
-[![Ruff](https://img.shields.io/badge/style-ruff-94a3b8?style=flat-square&labelColor=0A0A0A)](https://github.com/astral-sh/ruff)
-[![Mypy](https://img.shields.io/badge/mypy-checked-94a3b8?style=flat-square&labelColor=0A0A0A)](https://mypy-lang.org/)
+[![Rust](https://img.shields.io/badge/rust-2024-94a3b8?style=flat-square&color=94a3b8&labelColor=0A0A0A&logo=rust&logoColor=94a3b8)](https://www.rust-lang.org/)
+[![Clippy](https://img.shields.io/badge/clippy-pedantic-94a3b8?style=flat-square&labelColor=0A0A0A)](https://doc.rust-lang.org/clippy/)
 [![prek](https://img.shields.io/badge/prek-enabled-94a3b8?style=flat-square&labelColor=0A0A0A)](https://github.com/j178/prek)
 [![License](https://img.shields.io/badge/license-MIT-94a3b8?style=flat-square&labelColor=0A0A0A)](LICENSE)
 
@@ -58,19 +57,19 @@ Run with `--verbose` to see this check for your own installation.
 ## Features
 
 - **Comprehensive analysis suite**
-  - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and direct filesystem traversal (`os.scandir`) for exact byte counts. These are file sizes, like Finder's "Size"; `du` counts allocated disk blocks instead, so it can differ by a few percent. Casks are measured where they are installed (e.g. `/Applications/Foo.app`), not just their `Caskroom` staging directory.
+  - `analyze` — measures what's actually on disk, using `brew info --json=v2 --installed` and parallel filesystem traversal for exact byte counts. These are file sizes, like Finder's "Size"; `du` counts allocated disk blocks instead, so it can differ by a few percent. Casks are measured where they are installed (e.g. `/Applications/Foo.app`), not just their `Caskroom` staging directory.
   - `leaderboard` — a theoretical mode that ranks Homebrew's *entire* formula catalog from the local API cache, without requiring anything to be installed. Casks ship no bottles, so they can only be measured once installed, with `analyze`.
-  - `inspect` & `compare` — targeted analysis of individual or grouped packages. In theoretical mode, only the targets' dependency closure is resolved over the network rather than the entire catalog.
+  - `inspect` & `compare` — targeted analysis of individual or grouped packages, scoping disk measurement (or network resolution in theoretical mode) strictly to the targets' dependency closure.
   - `explain` — breaks down a target package's bloat by attributing fractional byte costs to each of its transitive dependencies.
-  - `export` — streams the underlying DataFrames to CSV or JSON for integration into external data pipelines.
+  - `export` — streams the computed bloat data to CSV or JSON for integration into external data pipelines.
 - **Cleanup planning**
   - `reclaim` — how much space `brew uninstall <packages>` followed by `brew autoremove` would free, and which uninstalls Homebrew would refuse because something still needs the package.
   - `orphans` — dependencies nothing you requested still needs: what `brew autoremove` would remove, with sizes.
   - `cleanup` — old versions still sitting in the Cellar that `brew cleanup` would remove. Like Homebrew, it leaves alone formulae whose newest version isn't installed yet, and pinned or linked versions.
   - `diff` — compares two `export` snapshots to show what grew, shrank, appeared, or disappeared, e.g. after a `brew upgrade`.
 - **Fractional Attribution Model** — shared dependencies (`openssl`, `zlib`, etc.) are divided evenly across the root packages that need them instead of being double-counted, and the shares add up to exactly the bytes measured. See [the attribution model](#the-attribution-model).
-- **Daemon-free** — no background indexing, no persistent database. Every run is a fresh, on-demand computation.
-- **Typed and tested** — fully type-annotated (strict `mypy`), linted with `ruff`, and covered by a `pytest` suite exercising the DAG traversal, fractional math, and network resolution logic. CI runs the full suite on macOS and Ubuntu across Python 3.12–3.14 and enforces a coverage floor.
+- **Single native binary & daemon-free** — compiled Rust executable with zero runtime dependencies, no background indexing, and no persistent database. Every run is a fresh, on-demand computation.
+- **Tested and linted** — checked with `clippy` (pedantic), `rustfmt`, unit tests, property-based mass-conservation tests (`proptest`), and CLI integration tests across macOS and Ubuntu, plus a live Homebrew smoke test and coverage floor in CI.
 
 ## A note on theoretical measurements
 
@@ -92,18 +91,18 @@ With [Homebrew](https://brew.sh):
 brew install jacksonfergusondev/tap/dark-matter
 ```
 
-Or from [PyPI](https://pypi.org/project/dark-matter-cli/) with [`uv`](https://docs.astral.sh/uv/):
+Or from [PyPI](https://pypi.org/project/dark-matter-cli/) (prebuilt native wheels via `maturin`) with [`uv`](https://docs.astral.sh/uv/):
 
 ```bash
 uv tool install dark-matter-cli
 ```
 
-For development:
+Or download a prebuilt binary from the [Releases page](https://github.com/JacksonFergusonDev/dark-matter/releases), or build from source with Cargo:
 
 ```bash
 git clone https://github.com/jacksonfergusondev/dark-matter.git
 cd dark-matter
-uv tool install --editable .
+cargo install --path .
 ```
 
 ## Usage
@@ -150,13 +149,13 @@ Theoretical modes read the catalog Homebrew caches for the current platform, so 
 
 ### Shell completion
 
-Tab completion covers subcommands, options, and the names of installed packages. Install it for your current shell (bash, zsh, fish, or PowerShell) with:
+Tab completion covers subcommands, options, and the names of installed packages. Install it for your current shell (bash, zsh, fish, elvish, or PowerShell) with:
 
 ```bash
 dark-matter --install-completion
 ```
 
-Then restart your shell. `--show-completion` prints the script instead, if you'd rather add it to your shell config yourself.
+Then restart your shell. `--show-completion` prints the activation snippet instead, if you'd rather add it to your shell config yourself.
 
 ### `analyze`
 
@@ -235,18 +234,19 @@ Neither takes options. Both measure the local installation only.
 The project uses [`just`](https://github.com/casey/just) to wrap common tasks:
 
 ```bash
-just format       # ruff format + fix
-just lint         # ruff + rumdl
-just typecheck    # mypy
-just test         # pytest
-just test-cov     # pytest with coverage report
+just format       # cargo fmt + rumdl fmt
+just lint         # cargo fmt --check + cargo clippy + rumdl
+just test         # cargo test --all-targets
+just test-cov     # cargo llvm-cov (85% line floor)
+just smoke        # live Homebrew smoke test
+just build        # cargo build --release
 just ci           # the full pipeline CI runs, locally
 just changelog    # preview release notes for unreleased commits
 ```
 
 ## Changelog
 
-Release notes for every version are on the [Releases page](https://github.com/JacksonFergusonDev/dark-matter/releases). They're generated from commit messages by [git-cliff](https://git-cliff.org), configured under `[tool.git-cliff]` in `pyproject.toml`; `just changelog` previews the notes for unreleased changes.
+Release notes for every version are on the [Releases page](https://github.com/JacksonFergusonDev/dark-matter/releases). They're generated from commit messages by [git-cliff](https://git-cliff.org), configured in `cliff.toml`; `just changelog` previews the notes for unreleased changes.
 
 ## Contact
 
