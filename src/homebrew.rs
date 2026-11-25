@@ -7,6 +7,7 @@ use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ahash::AHashMap;
 use indexmap::{IndexMap, IndexSet};
 use rayon::prelude::*;
 use serde::Deserialize;
@@ -15,7 +16,8 @@ use serde_json::Value;
 
 use crate::error::{DarkMatterError, Result};
 use crate::model::{
-    Bottle, BottleFile, BottleStable, BrewMetadata, Cask, CaskDependsOn, Formula, KegSizes,
+    Bottle, BottleFile, BottleStable, BrewMetadata, Cask, CaskDependsOn, Formula, InstalledKeg,
+    KegSizes, RuntimeDep, Versions,
 };
 
 pub const DEFAULT_MAX_WORKERS: usize = 16;
@@ -44,6 +46,23 @@ const MACOS_CODENAMES: &[(u32, &str)] = &[
 
 pub trait BrewRunner: Send + Sync {
     fn run_brew(&self, args: &[&str], failure: &str) -> Result<String>;
+
+    fn native_prefix(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn native_cache(&self) -> Option<PathBuf> {
+        None
+    }
+
+    fn native_installed_metadata(&self, _prefix: &Path) -> Option<BrewMetadata> {
+        None
+    }
+}
+
+fn use_brew_cli_override() -> bool {
+    std::env::var("DARK_MATTER_USE_BREW_CLI")
+        .is_ok_and(|val| val == "1" || val.eq_ignore_ascii_case("true"))
 }
 
 pub struct SystemBrewRunner;
@@ -75,6 +94,30 @@ impl BrewRunner for SystemBrewRunner {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn native_prefix(&self) -> Option<PathBuf> {
+        if use_brew_cli_override() {
+            None
+        } else {
+            detect_brew_prefix_native()
+        }
+    }
+
+    fn native_cache(&self) -> Option<PathBuf> {
+        if use_brew_cli_override() {
+            None
+        } else {
+            detect_brew_cache_native()
+        }
+    }
+
+    fn native_installed_metadata(&self, prefix: &Path) -> Option<BrewMetadata> {
+        if use_brew_cli_override() {
+            None
+        } else {
+            read_installed_metadata_from_disk(prefix, detect_brew_cache_native().as_deref())
+        }
     }
 }
 
@@ -151,6 +194,9 @@ pub fn get_brew_prefix() -> Result<PathBuf> {
 
 /// Retrieve the local Homebrew installation prefix using the provided runner.
 pub fn get_brew_prefix_with(runner: &dyn BrewRunner) -> Result<PathBuf> {
+    if let Some(prefix) = runner.native_prefix() {
+        return Ok(prefix);
+    }
     let stdout = runner.run_brew(&["--prefix"], "Failed to resolve Homebrew prefix")?;
     Ok(PathBuf::from(stdout.trim()))
 }
@@ -165,23 +211,650 @@ pub fn get_brew_cache() -> Result<PathBuf> {
 
 /// Retrieve Homebrew's cache directory using the provided runner.
 pub fn get_brew_cache_with(runner: &dyn BrewRunner) -> Result<PathBuf> {
+    if let Some(cache) = runner.native_cache() {
+        return Ok(cache);
+    }
     let stdout = runner.run_brew(&["--cache"], "Failed to resolve Homebrew cache")?;
     Ok(PathBuf::from(stdout.trim()))
 }
 
-/// Execute `brew info --json=v2 --installed` to extract installed package metadata.
-pub fn get_brew_metadata() -> Result<BrewMetadata> {
-    get_brew_metadata_with(&SystemBrewRunner)
-}
-
-/// Extract installed package metadata using the provided runner.
-pub fn get_brew_metadata_with(runner: &dyn BrewRunner) -> Result<BrewMetadata> {
+fn get_brew_metadata_via_cli(runner: &dyn BrewRunner) -> Result<BrewMetadata> {
     let stdout = runner.run_brew(
         &["info", "--json=v2", "--installed"],
         "Failed to execute brew API",
     )?;
     sonic_rs::from_str(&stdout)
         .map_err(|_| DarkMatterError::Pipeline("Failed to parse Homebrew JSON output.".into()))
+}
+
+/// Extract installed package metadata, reading receipts natively when possible.
+pub fn get_brew_metadata() -> Result<BrewMetadata> {
+    get_brew_metadata_with(&SystemBrewRunner)
+}
+
+/// Extract installed package metadata for a known Homebrew prefix using the provided runner.
+pub fn get_brew_metadata_for_prefix_with(
+    runner: &dyn BrewRunner,
+    prefix: &Path,
+) -> Result<BrewMetadata> {
+    if let Some(metadata) = runner.native_installed_metadata(prefix) {
+        return Ok(metadata);
+    }
+    get_brew_metadata_via_cli(runner)
+}
+
+/// Extract installed package metadata using the provided runner.
+pub fn get_brew_metadata_with(runner: &dyn BrewRunner) -> Result<BrewMetadata> {
+    if let Some(prefix) = runner.native_prefix()
+        && let Some(metadata) = runner.native_installed_metadata(&prefix)
+    {
+        return Ok(metadata);
+    }
+    get_brew_metadata_via_cli(runner)
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    let Ok(meta) = fs::metadata(path) else {
+        return false;
+    };
+    if !meta.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn looks_like_brew_prefix(path: &Path) -> bool {
+    path.join("Cellar").exists() || path.join("Caskroom").exists() || path.join("Homebrew").exists()
+}
+
+fn detect_brew_prefix_from(
+    env_prefix: Option<&OsStr>,
+    path_env: Option<&OsStr>,
+    defaults: &[&Path],
+) -> Option<PathBuf> {
+    // Honor an explicitly empty `PATH=""` before `HOMEBREW_PREFIX` so callers
+    // testing a missing `brew` executable still hit the CLI `BREW_NOT_FOUND` path.
+    if path_env.is_some_and(OsStr::is_empty) {
+        return None;
+    }
+
+    if let Some(prefix) = env_prefix.filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(prefix));
+    }
+
+    if let Some(paths) = path_env {
+        for dir in std::env::split_paths(paths) {
+            let brew_path = dir.join("brew");
+            if !is_executable_file(&brew_path) {
+                continue;
+            }
+            if let Some(candidate) = brew_path.parent().and_then(Path::parent)
+                && looks_like_brew_prefix(candidate)
+            {
+                return Some(candidate.to_path_buf());
+            }
+            if let Ok(canonical) = fs::canonicalize(&brew_path)
+                && let Some(candidate) = canonical.parent().and_then(Path::parent)
+            {
+                if candidate.file_name() == Some(OsStr::new("Homebrew"))
+                    && let Some(parent) = candidate.parent()
+                    && (looks_like_brew_prefix(parent) || parent.join("bin/brew").exists())
+                {
+                    return Some(parent.to_path_buf());
+                }
+                if looks_like_brew_prefix(candidate) {
+                    return Some(candidate.to_path_buf());
+                }
+            }
+        }
+    }
+
+    for candidate in defaults {
+        if candidate.join("Cellar").is_dir() || candidate.join("bin/brew").exists() {
+            return Some((*candidate).to_path_buf());
+        }
+    }
+
+    None
+}
+
+fn detect_brew_prefix_native() -> Option<PathBuf> {
+    let env_prefix = std::env::var_os("HOMEBREW_PREFIX");
+    let path_env = std::env::var_os("PATH");
+    #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+    let defaults: &[&Path] = &[Path::new("/opt/homebrew")];
+    #[cfg(all(target_os = "macos", target_arch = "x86_64"))]
+    let defaults: &[&Path] = &[Path::new("/usr/local")];
+    #[cfg(target_os = "linux")]
+    let defaults: &[&Path] = &[Path::new("/home/linuxbrew/.linuxbrew")];
+    #[cfg(not(any(
+        all(target_os = "macos", target_arch = "aarch64"),
+        all(target_os = "macos", target_arch = "x86_64"),
+        target_os = "linux"
+    )))]
+    let defaults: &[&Path] = &[];
+
+    detect_brew_prefix_from(env_prefix.as_deref(), path_env.as_deref(), defaults)
+}
+
+fn detect_brew_cache_from(
+    os: &str,
+    env_cache: Option<&OsStr>,
+    xdg_cache: Option<&OsStr>,
+    home: Option<&Path>,
+) -> Option<PathBuf> {
+    if let Some(cache) = env_cache.filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(cache));
+    }
+    if os == "macos" {
+        return home.map(|h| h.join("Library").join("Caches").join("Homebrew"));
+    }
+    if let Some(xdg) = xdg_cache.filter(|v| !v.is_empty()) {
+        return Some(PathBuf::from(xdg).join("Homebrew"));
+    }
+    home.map(|h| h.join(".cache").join("Homebrew"))
+}
+
+fn detect_brew_cache_native() -> Option<PathBuf> {
+    let env_cache = std::env::var_os("HOMEBREW_CACHE");
+    let xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+    let home = dirs::home_dir();
+    detect_brew_cache_from(
+        std::env::consts::OS,
+        env_cache.as_deref(),
+        xdg_cache.as_deref(),
+        home.as_deref(),
+    )
+}
+
+#[derive(Deserialize, Default)]
+struct ReceiptRuntimeDep {
+    #[serde(default)]
+    full_name: Option<String>,
+    #[serde(default)]
+    declared_directly: Option<bool>,
+}
+
+#[derive(Deserialize, Default)]
+struct ReceiptSource {
+    #[serde(default)]
+    tap: Option<String>,
+    #[serde(default)]
+    versions: Option<Versions>,
+}
+
+#[derive(Deserialize, Default)]
+struct FormulaReceipt {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    installed_on_request: bool,
+    #[serde(default)]
+    time: Option<u64>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    runtime_dependencies: Vec<ReceiptRuntimeDep>,
+    #[serde(default)]
+    source: Option<ReceiptSource>,
+}
+
+#[derive(Deserialize, Default)]
+struct CaskRuntimeDeps {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    formula: Vec<ReceiptRuntimeDep>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    cask: Vec<ReceiptRuntimeDep>,
+}
+
+#[derive(Deserialize, Default)]
+struct CaskReceipt {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    runtime_dependencies: CaskRuntimeDeps,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    uninstall_artifacts: Vec<Value>,
+}
+
+#[derive(Deserialize, Default)]
+struct CaskConfig {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    default: HashMap<String, Value>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    env: HashMap<String, Value>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    explicit: HashMap<String, Value>,
+}
+
+#[derive(Deserialize)]
+struct InternalFormulaMeta {
+    #[serde(default)]
+    stable_version: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    revision: u64,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    stable_dependencies: Vec<InternalDepEntry>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    stable_uses_from_macos: Vec<Vec<InternalDepEntry>>,
+}
+
+#[derive(Deserialize)]
+struct InternalCatalogMetaPayload {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    formulae: HashMap<String, InternalFormulaMeta>,
+}
+
+#[derive(Deserialize)]
+struct LegacyFormulaMeta {
+    name: String,
+    #[serde(default)]
+    versions: Option<Versions>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    revision: u64,
+    #[serde(default)]
+    dependencies: Option<Vec<String>>,
+}
+
+struct CachedFormulaMeta {
+    stable: Option<String>,
+    revision: u64,
+    dependencies: Option<Vec<String>>,
+}
+
+const CASK_ARTIFACT_DIR_MAPPINGS: &[(&str, &str, &str)] = &[
+    ("app", "appdir", DEFAULT_APPDIR),
+    ("suite", "appdir", DEFAULT_APPDIR),
+    ("font", "fontdir", "~/Library/Fonts"),
+    ("prefpane", "prefpanedir", "~/Library/PreferencePanes"),
+    ("qlplugin", "qlplugindir", "~/Library/QuickLook"),
+    ("colorpicker", "colorpickerdir", "~/Library/ColorPickers"),
+    ("dictionary", "dictionarydir", "~/Library/Dictionaries"),
+    ("service", "servicedir", "~/Library/Services"),
+    ("screen_saver", "screen_saverdir", "~/Library/Screen Savers"),
+    (
+        "vst_plugin",
+        "vst_plugindir",
+        "~/Library/Audio/Plug-Ins/VST",
+    ),
+    (
+        "vst3_plugin",
+        "vst3_plugindir",
+        "~/Library/Audio/Plug-Ins/VST3",
+    ),
+    (
+        "audio_unit_plugin",
+        "audio_unit_plugindir",
+        "~/Library/Audio/Plug-Ins/Components",
+    ),
+    ("input_method", "input_methoddir", "~/Library/Input Methods"),
+    (
+        "internet_plugin",
+        "internet_plugindir",
+        "~/Library/Internet Plug-Ins",
+    ),
+    (
+        "keyboard_layout",
+        "keyboard_layoutdir",
+        "/Library/Keyboard Layouts",
+    ),
+    ("mdimporter", "mdimporterdir", "~/Library/Spotlight"),
+    ("appimage", "appimagedir", "~/Applications"),
+];
+
+fn list_non_hidden_subdirs(dir: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let ft = entry.file_type().ok()?;
+            if !ft.is_dir() {
+                return None;
+            }
+            let name = entry.file_name().into_string().ok()?;
+            if name.starts_with('.') {
+                None
+            } else {
+                Some(name)
+            }
+        })
+        .collect();
+    names.sort();
+    names
+}
+
+fn direct_runtime_dep_names(deps: &[ReceiptRuntimeDep]) -> Vec<String> {
+    let mut seen = IndexSet::new();
+    for dep in deps {
+        if dep.declared_directly == Some(true)
+            && let Some(name) = dep.full_name.as_deref().filter(|s| !s.is_empty())
+        {
+            seen.insert(name.to_string());
+        }
+    }
+    seen.into_iter().collect()
+}
+
+fn load_cached_formula_meta(cache_dir: &Path) -> AHashMap<String, CachedFormulaMeta> {
+    let api_dir = cache_dir.join("api");
+    let internal_dir = api_dir.join("internal");
+    let tag = detect_bottle_tag();
+    let internal_path = internal_dir.join(format!("packages.{tag}.jws.json"));
+
+    if internal_path.exists()
+        && let Some(payload) = read_jws_payload_str(&internal_path)
+        && let Ok(parsed) = sonic_rs::from_str::<InternalCatalogMetaPayload>(&payload)
+    {
+        let is_linux = tag.ends_with("_linux");
+        return parsed
+            .formulae
+            .into_iter()
+            .map(|(name, entry)| {
+                let mut deps = runtime_dependencies(entry.stable_dependencies);
+                if is_linux {
+                    let first_elements: Vec<InternalDepEntry> = entry
+                        .stable_uses_from_macos
+                        .into_iter()
+                        .filter_map(|mut spec| {
+                            if spec.is_empty() {
+                                None
+                            } else {
+                                Some(spec.swap_remove(0))
+                            }
+                        })
+                        .collect();
+                    deps.extend(runtime_dependencies(first_elements));
+                }
+                let dependencies = Some(deps);
+                (
+                    name,
+                    CachedFormulaMeta {
+                        stable: entry.stable_version,
+                        revision: entry.revision,
+                        dependencies,
+                    },
+                )
+            })
+            .collect();
+    }
+
+    let formula_json = api_dir.join("formula.json");
+    let formula_jws = api_dir.join("formula.jws.json");
+    if formula_jws.exists() || formula_json.exists() {
+        let legacy: Vec<LegacyFormulaMeta> = load_api_cache(&formula_json, &formula_jws);
+        return legacy
+            .into_iter()
+            .map(|entry| {
+                let stable = entry.versions.and_then(|v| v.stable);
+                (
+                    entry.name,
+                    CachedFormulaMeta {
+                        stable,
+                        revision: entry.revision,
+                        dependencies: entry.dependencies,
+                    },
+                )
+            })
+            .collect();
+    }
+
+    AHashMap::new()
+}
+
+fn read_formula_from_disk(prefix: &Path, name: &str) -> Option<Formula> {
+    let rack = prefix.join("Cellar").join(name);
+    let keg_dirs: Vec<(String, PathBuf)> = read_rack_kegs(&rack)
+        .into_iter()
+        .filter(|(ver, _)| !ver.starts_with('.'))
+        .collect();
+    if keg_dirs.is_empty() {
+        return None;
+    }
+
+    let mut keg_records: Vec<(String, FormulaReceipt)> = keg_dirs
+        .into_iter()
+        .map(|(version, path)| {
+            let receipt = fs::read_to_string(path.join("INSTALL_RECEIPT.json"))
+                .ok()
+                .and_then(|raw| sonic_rs::from_str::<FormulaReceipt>(&raw).ok())
+                .unwrap_or_default();
+            (version, receipt)
+        })
+        .collect();
+
+    keg_records.sort_by(|(va, ra), (vb, rb)| ra.time.cmp(&rb.time).then_with(|| va.cmp(vb)));
+
+    let linked_keg = keg_link_target(
+        &prefix
+            .join("var")
+            .join("homebrew")
+            .join("linked")
+            .join(name),
+    );
+    let pinned = fs::symlink_metadata(
+        prefix
+            .join("var")
+            .join("homebrew")
+            .join("pinned")
+            .join(name),
+    )
+    .is_ok_and(|m| m.file_type().is_symlink());
+
+    let opt_target = keg_link_target(&prefix.join("opt").join(name));
+    let active_idx = opt_target
+        .as_deref()
+        .and_then(|target| keg_records.iter().position(|(ver, _)| ver == target))
+        .or_else(|| {
+            linked_keg
+                .as_deref()
+                .and_then(|target| keg_records.iter().position(|(ver, _)| ver == target))
+        })
+        .unwrap_or(keg_records.len() - 1);
+
+    let active_receipt = &keg_records[active_idx].1;
+    let dependencies = direct_runtime_dep_names(&active_receipt.runtime_dependencies);
+    let tap = active_receipt
+        .source
+        .as_ref()
+        .and_then(|s| s.tap.as_deref());
+    let full_name = match tap {
+        Some(t) if !t.is_empty() && t != "homebrew/core" => Some(format!("{t}/{name}")),
+        _ => Some(name.to_string()),
+    };
+    let versions = active_receipt
+        .source
+        .as_ref()
+        .and_then(|s| s.versions.clone());
+
+    let installed = keg_records
+        .into_iter()
+        .map(|(version, receipt)| InstalledKeg {
+            version: Some(version),
+            installed_on_request: receipt.installed_on_request,
+            runtime_dependencies: receipt
+                .runtime_dependencies
+                .into_iter()
+                .map(|dep| RuntimeDep {
+                    full_name: dep.full_name,
+                })
+                .collect(),
+        })
+        .collect();
+
+    Some(Formula {
+        name: name.to_string(),
+        full_name,
+        dependencies,
+        installed,
+        linked_keg,
+        versions,
+        revision: 0,
+        pinned,
+        bottle: None,
+    })
+}
+
+fn resolve_cask_config_dirs(metadata_dir: &Path) -> HashMap<String, String> {
+    let mut dirs = HashMap::new();
+    let Ok(raw) = fs::read_to_string(metadata_dir.join("config.json")) else {
+        return dirs;
+    };
+    let Ok(config) = sonic_rs::from_str::<CaskConfig>(&raw) else {
+        return dirs;
+    };
+    for layer in [config.default, config.env, config.explicit] {
+        for (key, value) in layer {
+            if let Some(path) = value.as_str() {
+                dirs.insert(key, path.to_string());
+            }
+        }
+    }
+    dirs
+}
+
+fn convert_cask_uninstall_artifacts(
+    uninstall_artifacts: &[Value],
+    dirs_map: &HashMap<String, String>,
+) -> Vec<Value> {
+    let mut artifacts = Vec::new();
+    for entry in uninstall_artifacts {
+        let Some(obj) = entry.as_object() else {
+            continue;
+        };
+        for (kind, value) in obj {
+            let Some(spec) = value.as_array() else {
+                continue;
+            };
+            if kind == "artifact" {
+                if let Some(target) = spec
+                    .get(1)
+                    .and_then(Value::as_object)
+                    .and_then(|opts| opts.get("target"))
+                    .and_then(Value::as_str)
+                {
+                    let resolved = expand_tilde(target);
+                    artifacts.push(serde_json::json!({
+                        "target": resolved.to_string_lossy(),
+                    }));
+                }
+                continue;
+            }
+            let Some(&(_, dir_key, default_dir)) = CASK_ARTIFACT_DIR_MAPPINGS
+                .iter()
+                .find(|&&(k, _, _)| k == kind)
+            else {
+                continue;
+            };
+            let Some(first) = spec.first().and_then(Value::as_str) else {
+                continue;
+            };
+            let base_dir_str = dirs_map.get(dir_key).map_or(default_dir, String::as_str);
+            let base_dir = expand_tilde(base_dir_str);
+            let override_target = spec
+                .get(1)
+                .and_then(Value::as_object)
+                .and_then(|opts| opts.get("target"))
+                .and_then(Value::as_str);
+            let resolved = if let Some(target) = override_target {
+                base_dir.join(expand_tilde(target))
+            } else {
+                let file_name = Path::new(first)
+                    .file_name()
+                    .and_then(OsStr::to_str)
+                    .unwrap_or(first);
+                base_dir.join(file_name)
+            };
+            artifacts.push(serde_json::json!({
+                "target": resolved.to_string_lossy(),
+            }));
+        }
+    }
+    artifacts
+}
+
+fn read_cask_from_disk(caskroom: &Path, token: &str) -> Option<Cask> {
+    let metadata_dir = caskroom.join(token).join(".metadata");
+    let receipt_path = metadata_dir.join("INSTALL_RECEIPT.json");
+    let Ok(raw) = fs::read_to_string(&receipt_path) else {
+        log::debug!("Cask '{token}' missing INSTALL_RECEIPT.json; falling back to brew info");
+        return None;
+    };
+    let Ok(receipt) = sonic_rs::from_str::<CaskReceipt>(&raw) else {
+        log::debug!("Cask '{token}' unparseable INSTALL_RECEIPT.json; falling back to brew info");
+        return None;
+    };
+
+    let dirs_map = resolve_cask_config_dirs(&metadata_dir);
+    let depends_on = CaskDependsOn {
+        formula: direct_runtime_dep_names(&receipt.runtime_dependencies.formula),
+        cask: direct_runtime_dep_names(&receipt.runtime_dependencies.cask),
+    };
+    let artifacts = convert_cask_uninstall_artifacts(&receipt.uninstall_artifacts, &dirs_map);
+
+    Some(Cask {
+        token: token.to_string(),
+        name: Vec::new(),
+        depends_on,
+        artifacts,
+    })
+}
+
+fn read_installed_metadata_from_disk(
+    prefix: &Path,
+    cache_dir: Option<&Path>,
+) -> Option<BrewMetadata> {
+    let cellar = prefix.join("Cellar");
+    let caskroom = prefix.join("Caskroom");
+    if !cellar.is_dir() && !caskroom.is_dir() {
+        return None;
+    }
+
+    let ((mut formulae, casks_opt), api_meta) = rayon::join(
+        || {
+            let rack_names = list_non_hidden_subdirs(&cellar);
+            let formulae: Vec<Formula> = rack_names
+                .par_iter()
+                .filter_map(|name| read_formula_from_disk(prefix, name))
+                .collect();
+
+            let cask_tokens = list_non_hidden_subdirs(&caskroom);
+            let casks = cask_tokens
+                .par_iter()
+                .map(|token| read_cask_from_disk(&caskroom, token))
+                .collect::<Option<Vec<Cask>>>();
+
+            (formulae, casks)
+        },
+        || cache_dir.map_or_default(load_cached_formula_meta),
+    );
+
+    let mut casks = casks_opt?;
+
+    if !api_meta.is_empty() {
+        for formula in &mut formulae {
+            let is_core = formula.full_name.as_deref() == Some(formula.name.as_str());
+            if is_core && let Some(meta) = api_meta.get(&formula.name) {
+                if let Some(deps) = &meta.dependencies {
+                    formula.dependencies.clone_from(deps);
+                }
+                if meta.stable.is_some() {
+                    formula.versions = Some(Versions {
+                        stable: meta.stable.clone(),
+                    });
+                }
+                formula.revision = meta.revision;
+            }
+        }
+    }
+
+    formulae.sort_by(|a, b| a.name.cmp(&b.name));
+    casks.sort_by(|a, b| a.token.cmp(&b.token));
+
+    Some(BrewMetadata { formulae, casks })
 }
 
 /// Split a macOS bottle tag into its CPU architecture and macOS major version.
@@ -2763,5 +3436,335 @@ mod tests {
 
         let catalog = load_internal_catalog(&path, "x86_64_linux").expect("catalog");
         assert_eq!(catalog.formulae[0].dependencies, vec!["zlib", "curl"]);
+    }
+
+    #[test]
+    fn test_detect_brew_prefix_from_env_path_and_defaults() {
+        // 1. Env var takes precedence over PATH and defaults.
+        let env_val = OsStr::new("/custom/env/prefix");
+        assert_eq!(
+            detect_brew_prefix_from(Some(env_val), None, &[]),
+            Some(PathBuf::from("/custom/env/prefix"))
+        );
+
+        // Empty env var is ignored.
+        assert_eq!(
+            detect_brew_prefix_from(Some(OsStr::new("")), None, &[]),
+            None
+        );
+
+        // 2. PATH lookup finds executable `brew` and resolves parent.parent when Cellar exists.
+        let tmp = TempDir::new().expect("tempdir");
+        let path_prefix = tmp.path().join("mybrew");
+        let bin_dir = path_prefix.join("bin");
+        fs::create_dir_all(&bin_dir).expect("mkdir bin");
+        fs::create_dir_all(path_prefix.join("Cellar")).expect("mkdir Cellar");
+        let brew_bin = bin_dir.join("brew");
+        fs::write(&brew_bin, "#!/bin/sh\n").expect("write brew");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = fs::metadata(&brew_bin).expect("meta").permissions();
+            perms.set_mode(0o755);
+            fs::set_permissions(&brew_bin, perms).expect("chmod");
+        }
+        assert_eq!(
+            detect_brew_prefix_from(None, Some(bin_dir.as_os_str()), &[]),
+            Some(path_prefix.clone())
+        );
+
+        // 3. Default fallback matches when Cellar or bin/brew exists.
+        let default_prefix = tmp.path().join("fallback_brew");
+        fs::create_dir_all(default_prefix.join("Cellar")).expect("mkdir fallback Cellar");
+        let missing_prefix = tmp.path().join("nonexistent");
+        assert_eq!(
+            detect_brew_prefix_from(
+                None,
+                None,
+                &[missing_prefix.as_path(), default_prefix.as_path()]
+            ),
+            Some(default_prefix)
+        );
+
+        // 4. Missing everywhere returns None.
+        assert_eq!(
+            detect_brew_prefix_from(None, None, &[missing_prefix.as_path()]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_detect_brew_cache_from() {
+        let home = Path::new("/Users/tester");
+
+        // Env var wins on all platforms.
+        assert_eq!(
+            detect_brew_cache_from(
+                "macos",
+                Some(OsStr::new("/tmp/brew-cache")),
+                None,
+                Some(home)
+            ),
+            Some(PathBuf::from("/tmp/brew-cache"))
+        );
+
+        // macOS default.
+        assert_eq!(
+            detect_brew_cache_from("macos", None, Some(OsStr::new("/xdg")), Some(home)),
+            Some(home.join("Library/Caches/Homebrew"))
+        );
+
+        // Linux with XDG_CACHE_HOME.
+        assert_eq!(
+            detect_brew_cache_from(
+                "linux",
+                None,
+                Some(OsStr::new("/home/tester/.xdg_cache")),
+                Some(Path::new("/home/tester")),
+            ),
+            Some(PathBuf::from("/home/tester/.xdg_cache/Homebrew"))
+        );
+
+        // Linux without XDG_CACHE_HOME (or empty).
+        assert_eq!(
+            detect_brew_cache_from(
+                "linux",
+                None,
+                Some(OsStr::new("")),
+                Some(Path::new("/home/tester")),
+            ),
+            Some(PathBuf::from("/home/tester/.cache/Homebrew"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_read_installed_metadata_from_disk_formulae() {
+        let tmp = TempDir::new().expect("tempdir");
+        let prefix = tmp.path();
+
+        // Formula 1: core formula with two kegs, linked_keg, pinned, direct vs transitive deps.
+        let f1_old = prefix.join("Cellar/jq/1.6");
+        let f1_new = prefix.join("Cellar/jq/1.7");
+        fs::create_dir_all(&f1_old).expect("mkdir jq 1.6");
+        fs::create_dir_all(&f1_new).expect("mkdir jq 1.7");
+        fs::write(
+            f1_old.join("INSTALL_RECEIPT.json"),
+            r#"{
+                "installed_on_request": false,
+                "time": 1000,
+                "runtime_dependencies": [],
+                "source": { "tap": "homebrew/core", "versions": { "stable": "1.6" } }
+            }"#,
+        )
+        .expect("write jq 1.6 receipt");
+        fs::write(
+            f1_new.join("INSTALL_RECEIPT.json"),
+            r#"{
+                "installed_on_request": true,
+                "time": 2000,
+                "runtime_dependencies": [
+                    { "full_name": "oniguruma", "declared_directly": true },
+                    { "full_name": "oniguruma", "declared_directly": true },
+                    { "full_name": "ca-certificates", "declared_directly": false }
+                ],
+                "source": { "tap": "homebrew/core", "versions": { "stable": "1.7" } }
+            }"#,
+        )
+        .expect("write jq 1.7 receipt");
+
+        fs::create_dir_all(prefix.join("var/homebrew/linked")).expect("mkdir linked");
+        fs::create_dir_all(prefix.join("var/homebrew/pinned")).expect("mkdir pinned");
+        fs::create_dir_all(prefix.join("opt")).expect("mkdir opt");
+        symlink_path(
+            Path::new("../../../Cellar/jq/1.7"),
+            &prefix.join("var/homebrew/linked/jq"),
+        );
+        symlink_path(
+            Path::new("../../../Cellar/jq/1.7"),
+            &prefix.join("var/homebrew/pinned/jq"),
+        );
+        symlink_path(Path::new("../Cellar/jq/1.7"), &prefix.join("opt/jq"));
+
+        // Formula 2: third-party tap formula.
+        let f2 = prefix.join("Cellar/mytool/0.1.0");
+        fs::create_dir_all(&f2).expect("mkdir mytool");
+        fs::write(
+            f2.join("INSTALL_RECEIPT.json"),
+            r#"{
+                "installed_on_request": true,
+                "time": 1500,
+                "runtime_dependencies": [],
+                "source": { "tap": "acme/tap", "versions": { "stable": "0.1.0" } }
+            }"#,
+        )
+        .expect("write mytool receipt");
+
+        // Local API cache for multi-keg revision/stable lookup.
+        let cache_dir = tmp.path().join("cache");
+        let api_dir = cache_dir.join("api");
+        fs::create_dir_all(&api_dir).expect("mkdir api");
+        fs::write(
+            api_dir.join("formula.json"),
+            r#"[{"name":"jq","versions":{"stable":"1.7.1"},"revision":2}]"#,
+        )
+        .expect("write formula.json");
+
+        let meta =
+            read_installed_metadata_from_disk(prefix, Some(&cache_dir)).expect("native metadata");
+
+        assert_eq!(meta.formulae.len(), 2);
+        let jq = &meta.formulae[0];
+        assert_eq!(jq.name, "jq");
+        assert_eq!(jq.full_name.as_deref(), Some("jq"));
+        assert_eq!(jq.dependencies, vec!["oniguruma"]);
+        assert_eq!(jq.linked_keg.as_deref(), Some("1.7"));
+        assert!(jq.pinned);
+        assert_eq!(jq.installed.len(), 2);
+        assert_eq!(jq.installed[0].version.as_deref(), Some("1.6"));
+        assert!(!jq.installed[0].installed_on_request);
+        assert_eq!(jq.installed[1].version.as_deref(), Some("1.7"));
+        assert!(jq.installed[1].installed_on_request);
+        assert_eq!(
+            jq.versions.as_ref().and_then(|v| v.stable.as_deref()),
+            Some("1.7.1")
+        );
+        assert_eq!(jq.revision, 2);
+
+        let mytool = &meta.formulae[1];
+        assert_eq!(mytool.name, "mytool");
+        assert_eq!(mytool.full_name.as_deref(), Some("acme/tap/mytool"));
+        assert!(!mytool.pinned);
+        assert_eq!(meta.casks, Vec::new());
+    }
+
+    #[test]
+    fn test_read_installed_metadata_from_disk_casks() {
+        let tmp = TempDir::new().expect("tempdir");
+        let prefix = tmp.path();
+
+        // Cask: app + font + explicit config.json override + depends_on.formula + skipped binary.
+        let cask_meta = prefix.join("Caskroom/demo-app/.metadata");
+        fs::create_dir_all(&cask_meta).expect("mkdir cask meta");
+        fs::write(
+            cask_meta.join("config.json"),
+            r#"{
+                "default": { "appdir": "/Applications", "fontdir": "/Library/Fonts", "languages": ["en"] },
+                "env": { "appdir": "/EnvApps" },
+                "explicit": { "appdir": "/CustomApps" }
+            }"#,
+        )
+        .expect("write cask config");
+        fs::write(
+            cask_meta.join("INSTALL_RECEIPT.json"),
+            r#"{
+                "runtime_dependencies": {
+                    "formula": [
+                        { "full_name": "python@3.14", "declared_directly": true },
+                        { "full_name": "openssl@3", "declared_directly": false }
+                    ],
+                    "cask": [
+                        { "full_name": "helper-cask", "declared_directly": true }
+                    ]
+                },
+                "uninstall_artifacts": [
+                    { "app": ["Demo.app"] },
+                    { "font": ["sub/Demo.ttf"] },
+                    { "binary": ["/CustomApps/Demo.app/Contents/MacOS/demo"] },
+                    { "zap": [{ "trash": ["~/Library/Caches/Demo"] }] }
+                ]
+            }"#,
+        )
+        .expect("write cask receipt");
+
+        let meta = read_installed_metadata_from_disk(prefix, None).expect("native metadata");
+        assert_eq!(meta.formulae, Vec::new());
+        assert_eq!(meta.casks.len(), 1);
+
+        let cask = &meta.casks[0];
+        assert_eq!(cask.token, "demo-app");
+        assert_eq!(cask.depends_on.formula, vec!["python@3.14"]);
+        assert_eq!(cask.depends_on.cask, vec!["helper-cask"]);
+        assert_eq!(
+            cask.artifacts,
+            vec![
+                serde_json::json!({ "target": "/CustomApps/Demo.app" }),
+                serde_json::json!({ "target": "/Library/Fonts/Demo.ttf" }),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_read_installed_metadata_from_disk_legacy_cask_triggers_fallback() {
+        let tmp = TempDir::new().expect("tempdir");
+        let prefix = tmp.path();
+        fs::create_dir_all(prefix.join("Cellar")).expect("mkdir Cellar");
+        // Legacy pre-Homebrew-7 cask without .metadata/INSTALL_RECEIPT.json
+        fs::create_dir_all(prefix.join("Caskroom/legacy-app/.metadata/1.0/20240101"))
+            .expect("mkdir legacy cask");
+
+        assert!(read_installed_metadata_from_disk(prefix, None).is_none());
+    }
+
+    #[test]
+    fn test_read_installed_metadata_from_disk_missing_cellar_and_caskroom() {
+        let tmp = TempDir::new().expect("tempdir");
+        assert!(read_installed_metadata_from_disk(tmp.path(), None).is_none());
+    }
+
+    #[test]
+    fn test_detect_brew_prefix_ignores_empty_path_and_non_brew_wrapper() {
+        let tmp = TempDir::new().expect("tempdir");
+        let wrapper_bin = tmp.path().join("bin");
+        fs::create_dir_all(&wrapper_bin).expect("mkdir wrapper");
+        let wrapper_brew = wrapper_bin.join("brew");
+        fs::write(&wrapper_brew, "#!/bin/sh\n").expect("write wrapper");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&wrapper_brew, fs::Permissions::from_mode(0o755)).expect("chmod");
+        }
+
+        // Empty PATH returns None even when HOMEBREW_PREFIX is set.
+        assert_eq!(
+            detect_brew_prefix_from(
+                Some(OsStr::new("/opt/homebrew")),
+                Some(OsStr::new("")),
+                &[tmp.path()],
+            ),
+            None
+        );
+
+        // Wrapper script without Cellar/Caskroom/Homebrew must not return wrapper's parent.
+        assert_eq!(
+            detect_brew_prefix_from(None, Some(wrapper_bin.as_os_str()), &[]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_convert_cask_uninstall_artifacts_handles_artifact_stanza_and_overrides() {
+        let mut dirs_map = HashMap::new();
+        dirs_map.insert("appdir".to_string(), "/Applications".to_string());
+
+        let artifacts = vec![
+            serde_json::json!({"app": ["Old.app", {"target": "New.app"}]}),
+            serde_json::json!({"app": ["Abs.app", {"target": "/Custom/Abs.app"}]}),
+            serde_json::json!({"artifact": ["src.plist", {"target": "/Library/LaunchAgents/x.plist"}]}),
+            serde_json::json!({"binary": ["/Applications/Old.app/Contents/MacOS/cli"]}),
+        ];
+        let converted = convert_cask_uninstall_artifacts(&artifacts, &dirs_map);
+        let targets: Vec<&str> = converted
+            .iter()
+            .filter_map(|v| v.get("target").and_then(Value::as_str))
+            .collect();
+        assert_eq!(
+            targets,
+            vec![
+                "/Applications/New.app",
+                "/Custom/Abs.app",
+                "/Library/LaunchAgents/x.plist",
+            ]
+        );
     }
 }

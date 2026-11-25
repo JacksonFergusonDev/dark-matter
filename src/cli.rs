@@ -438,6 +438,10 @@ fn load_installed_context(
 ) -> Result<(PathBuf, BrewMetadata)> {
     let msg = target_msg.unwrap_or("Scanning physical disk footprint...");
     with_spinner(ctx.interactive_spinners, spinner_to_stderr, msg, || {
+        if let Some(prefix) = ctx.runner.native_prefix() {
+            let metadata = homebrew::get_brew_metadata_for_prefix_with(ctx.runner, &prefix)?;
+            return Ok((prefix, metadata));
+        }
         std::thread::scope(|s| {
             let prefix_handle = s.spawn(|| homebrew::get_brew_prefix_with(ctx.runner));
             let metadata_res = homebrew::get_brew_metadata_with(ctx.runner);
