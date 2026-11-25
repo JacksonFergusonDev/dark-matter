@@ -1,9 +1,10 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fs;
-use std::io;
+use std::io::{self, Write};
 use std::path::{Component, Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use indexmap::{IndexMap, IndexSet};
@@ -21,6 +22,8 @@ pub const DEFAULT_MAX_WORKERS: usize = 16;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 pub const TOKEN_SCOPE_BATCH_SIZE: usize = 50;
 pub const BOTTLE_SIZE_CACHE_MAX_ENTRIES: usize = 50_000;
+
+const ASYNC_MAX_CONCURRENT_REQUESTS: usize = 32;
 
 const BREW_NOT_FOUND: &str = "Homebrew (`brew`) was not found on PATH. Is Homebrew installed?";
 const GHCR_TOKEN_URL: &str = "https://ghcr.io/token";
@@ -47,6 +50,16 @@ pub struct SystemBrewRunner;
 
 impl BrewRunner for SystemBrewRunner {
     fn run_brew(&self, args: &[&str], failure: &str) -> Result<String> {
+        if args == ["--prefix"]
+            && let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX").filter(|v| !v.is_empty())
+        {
+            return Ok(prefix.to_string_lossy().into_owned());
+        }
+        if args == ["--cache"]
+            && let Some(cache) = std::env::var_os("HOMEBREW_CACHE").filter(|v| !v.is_empty())
+        {
+            return Ok(cache.to_string_lossy().into_owned());
+        }
         log::debug!("Running: brew {}", args.join(" "));
         let output = Command::new("brew").args(args).output().map_err(|err| {
             if err.kind() == io::ErrorKind::NotFound {
@@ -73,6 +86,14 @@ pub trait BottleFetcher: Send + Sync {
 pub trait PhysicalSizer: Send + Sync {
     fn keg_sizes(&self, formula: &Formula, prefix: &Path) -> KegSizes;
     fn cask_size(&self, cask: &Cask, prefix: &Path) -> u64;
+
+    fn current_keg_size(&self, formula: &Formula, prefix: &Path) -> u64 {
+        self.keg_sizes(formula, prefix).current
+    }
+
+    fn stale_keg_sizes(&self, formula: &Formula, prefix: &Path) -> BTreeMap<String, u64> {
+        self.keg_sizes(formula, prefix).stale
+    }
 }
 
 pub struct FsSizer;
@@ -84,6 +105,14 @@ impl PhysicalSizer for FsSizer {
 
     fn cask_size(&self, cask: &Cask, prefix: &Path) -> u64 {
         get_cask_size(cask, prefix)
+    }
+
+    fn current_keg_size(&self, formula: &Formula, prefix: &Path) -> u64 {
+        get_current_keg_size(formula, prefix)
+    }
+
+    fn stale_keg_sizes(&self, formula: &Formula, prefix: &Path) -> BTreeMap<String, u64> {
+        get_stale_keg_sizes(formula, prefix)
     }
 }
 
@@ -102,15 +131,21 @@ impl TheoreticalSizer for DefaultTheoreticalSizer {
     fn resolve_bottle_sizes(&self, bottles: &IndexMap<String, String>) -> HashMap<String, u64> {
         let cache_path = default_bottle_size_cache_path();
         let mut cache = load_bottle_size_cache(&cache_path);
+        let initial_len = cache.len();
         let resolved =
             resolve_bottle_sizes(bottles, &mut cache, DEFAULT_MAX_WORKERS, DEFAULT_TIMEOUT);
-        save_bottle_size_cache(&cache_path, &cache, BOTTLE_SIZE_CACHE_MAX_ENTRIES);
+        if cache.len() > initial_len {
+            save_bottle_size_cache(&cache_path, &cache, BOTTLE_SIZE_CACHE_MAX_ENTRIES);
+        }
         resolved
     }
 }
 
 /// Retrieve the local Homebrew installation prefix.
 pub fn get_brew_prefix() -> Result<PathBuf> {
+    if let Some(prefix) = std::env::var_os("HOMEBREW_PREFIX").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(prefix));
+    }
     get_brew_prefix_with(&SystemBrewRunner)
 }
 
@@ -122,6 +157,9 @@ pub fn get_brew_prefix_with(runner: &dyn BrewRunner) -> Result<PathBuf> {
 
 /// Retrieve Homebrew's cache directory, honoring `HOMEBREW_CACHE`.
 pub fn get_brew_cache() -> Result<PathBuf> {
+    if let Some(cache) = std::env::var_os("HOMEBREW_CACHE").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(cache));
+    }
     get_brew_cache_with(&SystemBrewRunner)
 }
 
@@ -142,7 +180,7 @@ pub fn get_brew_metadata_with(runner: &dyn BrewRunner) -> Result<BrewMetadata> {
         &["info", "--json=v2", "--installed"],
         "Failed to execute brew API",
     )?;
-    serde_json::from_str(&stdout)
+    sonic_rs::from_str(&stdout)
         .map_err(|_| DarkMatterError::Pipeline("Failed to parse Homebrew JSON output.".into()))
 }
 
@@ -170,17 +208,24 @@ fn extract_plist_product_version(plist: &str) -> Option<String> {
 }
 
 fn current_macos_release() -> Option<String> {
-    if let Ok(output) = Command::new("sw_vers").arg("-productVersion").output()
-        && output.status.success()
+    if let Ok(plist) = fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+        && let Some(version) = extract_plist_product_version(&plist)
     {
+        return Some(version);
+    }
+
+    let output = Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()?;
+    if output.status.success() {
         let version = String::from_utf8_lossy(&output.stdout).trim().to_string();
         if !version.is_empty() {
             return Some(version);
         }
     }
 
-    let plist = fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist").ok()?;
-    extract_plist_product_version(&plist)
+    None
 }
 
 /// Infer the Homebrew bottle tag for the current machine.
@@ -265,10 +310,15 @@ fn dir_size_recursive(path: &Path) -> u64 {
             subdirs.push(entry.path());
         }
     }
-    // `entries` was consumed and closed by the loop, so each thread holds at most one FD.
-    for subdir in subdirs {
-        total += dir_size_recursive(&subdir);
-    }
+    // `entries` was consumed and closed by the loop, so each worker holds at most one FD.
+    total += match subdirs.len() {
+        0 => 0,
+        1 => dir_size_recursive(&subdirs[0]),
+        _ => subdirs
+            .par_iter()
+            .map(|subdir| dir_size_recursive(subdir))
+            .sum(),
+    };
     total
 }
 
@@ -410,12 +460,8 @@ fn cleanup_candidates<'a>(
         .collect()
 }
 
-/// Measure a formula's current keg separately from any older kegs `brew cleanup` would remove.
-pub fn get_keg_sizes(formula: &Formula, prefix: &Path) -> KegSizes {
-    let rack = prefix.join("Cellar").join(&formula.name);
-    let current = current_keg(formula, prefix);
-
-    let mut kegs: Vec<(String, PathBuf)> = match fs::read_dir(&rack) {
+fn read_rack_kegs(rack: &Path) -> Vec<(String, PathBuf)> {
+    let mut kegs: Vec<(String, PathBuf)> = match fs::read_dir(rack) {
         Ok(entries) => entries
             .filter_map(std::result::Result::ok)
             .filter_map(|entry| {
@@ -431,6 +477,54 @@ pub fn get_keg_sizes(formula: &Formula, prefix: &Path) -> KegSizes {
         Err(_) => Vec::new(),
     };
     kegs.sort_by(|(a, _), (b, _)| a.cmp(b));
+    kegs
+}
+
+fn is_single_normal_component(name: &str) -> bool {
+    let mut components = Path::new(name).components();
+    matches!(
+        (components.next(), components.next()),
+        (Some(Component::Normal(_)), None)
+    )
+}
+
+/// Measure only a formula's active keg without touching stale kegs.
+pub fn get_current_keg_size(formula: &Formula, prefix: &Path) -> u64 {
+    let rack = prefix.join("Cellar").join(&formula.name);
+    if let Some(current_name) = current_keg(formula, prefix)
+        && is_single_normal_component(&current_name)
+    {
+        let keg_path = rack.join(&current_name);
+        if fs::symlink_metadata(&keg_path)
+            .is_ok_and(|meta| meta.is_dir() && !meta.file_type().is_symlink())
+        {
+            return get_directory_size(&keg_path);
+        }
+    }
+    get_directory_size(&rack)
+}
+
+/// Measure only cleanup-eligible stale kegs for a formula without touching its active keg.
+pub fn get_stale_keg_sizes(formula: &Formula, prefix: &Path) -> BTreeMap<String, u64> {
+    let rack = prefix.join("Cellar").join(&formula.name);
+    let kegs = read_rack_kegs(&rack);
+    let Some(current_name) =
+        current_keg(formula, prefix).filter(|name| kegs.iter().any(|(k, _)| k == name))
+    else {
+        return BTreeMap::new();
+    };
+
+    cleanup_candidates(formula, prefix, &kegs, &current_name)
+        .into_iter()
+        .map(|(name, path)| (name.clone(), get_directory_size(path)))
+        .collect()
+}
+
+/// Measure a formula's current keg separately from any older kegs `brew cleanup` would remove.
+pub fn get_keg_sizes(formula: &Formula, prefix: &Path) -> KegSizes {
+    let rack = prefix.join("Cellar").join(&formula.name);
+    let current = current_keg(formula, prefix);
+    let kegs = read_rack_kegs(&rack);
 
     let Some(current_name) = current.filter(|name| kegs.iter().any(|(k, _)| k == name)) else {
         return KegSizes {
@@ -513,6 +607,11 @@ pub fn get_cask_size(cask: &Cask, prefix: &Path) -> u64 {
     caskroom_size + artifacts_size
 }
 
+#[derive(Deserialize)]
+struct JwsEnvelope {
+    payload: String,
+}
+
 fn read_jws_payload_str(jws_path: &Path) -> Option<String> {
     let raw = match fs::read_to_string(jws_path) {
         Ok(content) => content,
@@ -522,45 +621,24 @@ fn read_jws_payload_str(jws_path: &Path) -> Option<String> {
         }
     };
 
-    let jws_data: Value = match serde_json::from_str(&raw) {
-        Ok(data) => data,
+    match sonic_rs::from_str::<JwsEnvelope>(&raw) {
+        Ok(envelope) => Some(envelope.payload),
         Err(err) => {
             log::error!("Failed to read {}: {err}", jws_path.display());
-            return None;
-        }
-    };
-
-    let Some(payload) = jws_data.get("payload").and_then(Value::as_str) else {
-        log::error!("JWS payload in {} is not a string.", jws_path.display());
-        return None;
-    };
-
-    Some(payload.to_string())
-}
-
-fn read_jws_payload(jws_path: &Path) -> Option<Value> {
-    let payload = read_jws_payload_str(jws_path)?;
-    match serde_json::from_str(&payload) {
-        Ok(parsed) => Some(parsed),
-        Err(err) => {
-            log::error!("Failed to parse JWS payload: {err}");
             None
         }
     }
 }
 
 fn load_api_cache<T: DeserializeOwned>(json_path: &Path, jws_path: &Path) -> Vec<T> {
-    let data = if jws_path.exists() {
-        let Some(parsed) = read_jws_payload(jws_path) else {
+    let raw = if jws_path.exists() {
+        let Some(payload) = read_jws_payload_str(jws_path) else {
             return Vec::new();
         };
-        parsed
+        payload
     } else if json_path.exists() {
-        match fs::read_to_string(json_path)
-            .map_err(|err| err.to_string())
-            .and_then(|raw| serde_json::from_str::<Value>(&raw).map_err(|err| err.to_string()))
-        {
-            Ok(parsed) => parsed,
+        match fs::read_to_string(json_path) {
+            Ok(content) => content,
             Err(err) => {
                 log::error!("Failed to read {}: {err}", json_path.display());
                 return Vec::new();
@@ -570,12 +648,7 @@ fn load_api_cache<T: DeserializeOwned>(json_path: &Path, jws_path: &Path) -> Vec
         return Vec::new();
     };
 
-    if !data.is_array() {
-        log::error!("API payload is not a list.");
-        return Vec::new();
-    }
-
-    match serde_json::from_value(data) {
+    match sonic_rs::from_str::<Vec<T>>(&raw) {
         Ok(items) => items,
         Err(err) => {
             log::error!("Failed to deserialize API payload: {err}");
@@ -584,32 +657,99 @@ fn load_api_cache<T: DeserializeOwned>(json_path: &Path, jws_path: &Path) -> Vec
     }
 }
 
+fn deserialize_null_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    T: Default + Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::deserialize(deserializer)?.unwrap_or_default())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum DepTagSpec {
+    Single(String),
+    Multiple(Vec<String>),
+    Other(#[allow(dead_code)] serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum InternalDepEntry {
+    Name(String),
+    Tagged(IndexMap<String, DepTagSpec>),
+    Other(#[allow(dead_code)] serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrVec {
+    Single(String),
+    Multiple(Vec<String>),
+    Other(#[allow(dead_code)] serde::de::IgnoredAny),
+}
+
+#[derive(Deserialize)]
+struct InternalFormula {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    stable_dependencies: Vec<InternalDepEntry>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    stable_uses_from_macos: Vec<Vec<InternalDepEntry>>,
+    #[serde(default)]
+    bottle_checksum: Option<String>,
+    #[serde(default)]
+    bottle_tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct InternalCaskDependsOn {
+    #[serde(rename = ":formula", default)]
+    formula: Option<StringOrVec>,
+}
+
+#[derive(Deserialize)]
+struct InternalCask {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    names: Vec<String>,
+    #[serde(default)]
+    depends_on_args: Option<InternalCaskDependsOn>,
+}
+
+#[derive(Deserialize)]
+struct InternalCatalogPayload {
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    formulae: IndexMap<String, InternalFormula>,
+    #[serde(default, deserialize_with = "deserialize_null_default")]
+    casks: IndexMap<String, InternalCask>,
+}
+
 fn is_non_runtime_tag(tag: &str) -> bool {
     NON_RUNTIME_DEPENDENCY_TAGS.contains(&tag)
 }
 
-fn runtime_dependencies(entries: &[Value]) -> Vec<String> {
-    let mut deps = Vec::new();
-    for entry in entries {
-        match entry {
-            Value::String(name) => deps.push(name.clone()),
-            Value::Object(map) => {
-                for (name, tags) in map {
-                    let excluded = match tags {
-                        Value::String(tag) => is_non_runtime_tag(tag),
-                        Value::Array(list) => list
-                            .iter()
-                            .filter_map(Value::as_str)
-                            .any(is_non_runtime_tag),
-                        _ => false,
-                    };
-                    if !excluded {
-                        deps.push(name.clone());
-                    }
+fn push_runtime_dependency(deps: &mut Vec<String>, entry: InternalDepEntry) {
+    match entry {
+        InternalDepEntry::Name(name) => deps.push(name),
+        InternalDepEntry::Tagged(map) => {
+            for (name, tags) in map {
+                let excluded = match tags {
+                    DepTagSpec::Single(tag) => is_non_runtime_tag(&tag),
+                    DepTagSpec::Multiple(list) => list.iter().any(|tag| is_non_runtime_tag(tag)),
+                    DepTagSpec::Other(_) => false,
+                };
+                if !excluded {
+                    deps.push(name);
                 }
             }
-            _ => {}
         }
+        InternalDepEntry::Other(_) => {}
+    }
+}
+
+fn runtime_dependencies(entries: Vec<InternalDepEntry>) -> Vec<String> {
+    let mut deps = Vec::with_capacity(entries.len());
+    for entry in entries {
+        push_runtime_dependency(&mut deps, entry);
     }
     deps
 }
@@ -618,42 +758,30 @@ fn ghcr_image_name(formula: &str) -> String {
     formula.replace('@', "/").replace('+', "x")
 }
 
-fn normalize_internal_formula(name: &str, formula: &Value, tag: &str) -> Formula {
-    let obj = formula.as_object();
-    let mut deps = obj
-        .and_then(|m| m.get("stable_dependencies"))
-        .and_then(Value::as_array)
-        .map_or_else(Vec::new, |entries| runtime_dependencies(entries));
+fn normalize_internal_formula(name: String, formula: InternalFormula, tag: &str) -> Formula {
+    let mut deps = runtime_dependencies(formula.stable_dependencies);
 
-    if tag.ends_with("_linux")
-        && let Some(uses) = obj
-            .and_then(|m| m.get("stable_uses_from_macos"))
-            .and_then(Value::as_array)
-    {
-        let first_elements: Vec<Value> = uses
-            .iter()
-            .filter_map(|spec| spec.as_array().and_then(|arr| arr.first()).cloned())
-            .collect();
-        deps.extend(runtime_dependencies(&first_elements));
+    if tag.ends_with("_linux") {
+        for mut spec in formula.stable_uses_from_macos {
+            if !spec.is_empty() {
+                push_runtime_dependency(&mut deps, spec.swap_remove(0));
+            }
+        }
     }
 
-    let bottle = obj
-        .and_then(|m| m.get("bottle_checksum"))
-        .and_then(Value::as_str)
+    let bottle = formula
+        .bottle_checksum
         .filter(|checksum| !checksum.is_empty())
         .map(|checksum| {
-            let raw_tag = obj
-                .and_then(|m| m.get("bottle_tag"))
-                .and_then(Value::as_str)
-                .unwrap_or(tag);
+            let raw_tag = formula.bottle_tag.as_deref().unwrap_or(tag);
             let bottle_tag = raw_tag.strip_prefix(':').unwrap_or(raw_tag).to_string();
-            let image = ghcr_image_name(name);
+            let image = ghcr_image_name(&name);
             let url = format!("https://ghcr.io/v2/homebrew/core/{image}/blobs/sha256:{checksum}");
             let mut files = IndexMap::new();
             files.insert(
                 bottle_tag,
                 BottleFile {
-                    sha256: checksum.to_string(),
+                    sha256: checksum,
                     url,
                 },
             );
@@ -663,56 +791,29 @@ fn normalize_internal_formula(name: &str, formula: &Value, tag: &str) -> Formula
         });
 
     Formula {
-        name: name.to_string(),
+        name,
         dependencies: deps,
         bottle,
         ..Formula::default()
     }
 }
 
-fn normalize_internal_cask(token: &str, cask: &Value) -> Cask {
-    let obj = cask.as_object();
-    let name = obj
-        .and_then(|m| m.get("names"))
-        .and_then(Value::as_array)
-        .map_or_default(|arr| {
-            arr.iter()
-                .filter_map(Value::as_str)
-                .map(ToOwned::to_owned)
-                .collect()
-        });
-
-    let formula = match obj
-        .and_then(|m| m.get("depends_on_args"))
-        .and_then(Value::as_object)
-        .and_then(|args| args.get(":formula"))
-    {
-        Some(Value::String(single)) => vec![single.clone()],
-        Some(Value::Array(list)) => list
-            .iter()
-            .filter_map(Value::as_str)
-            .map(ToOwned::to_owned)
-            .collect(),
-        _ => Vec::new(),
+fn normalize_internal_cask(token: String, cask: InternalCask) -> Cask {
+    let formula = match cask.depends_on_args.and_then(|args| args.formula) {
+        Some(StringOrVec::Single(single)) => vec![single],
+        Some(StringOrVec::Multiple(list)) => list,
+        Some(StringOrVec::Other(_)) | None => Vec::new(),
     };
 
     Cask {
-        token: token.to_string(),
-        name,
+        token,
+        name: cask.names,
         depends_on: CaskDependsOn {
             formula,
             cask: Vec::new(),
         },
         artifacts: Vec::new(),
     }
-}
-
-#[derive(Deserialize)]
-struct InternalCatalogPayload {
-    #[serde(default)]
-    formulae: IndexMap<String, Value>,
-    #[serde(default)]
-    casks: IndexMap<String, Value>,
 }
 
 fn load_internal_catalog(jws_path: &Path, tag: &str) -> Result<BrewMetadata> {
@@ -724,19 +825,19 @@ fn load_internal_catalog(jws_path: &Path, tag: &str) -> Result<BrewMetadata> {
     };
 
     let payload = read_jws_payload_str(jws_path).ok_or_else(parse_err)?;
-    let parsed: InternalCatalogPayload = serde_json::from_str(&payload).map_err(|err| {
+    let parsed: InternalCatalogPayload = sonic_rs::from_str(&payload).map_err(|err| {
         log::error!("Failed to parse JWS payload: {err}");
         parse_err()
     })?;
 
     let formulae = parsed
         .formulae
-        .iter()
+        .into_iter()
         .map(|(name, entry)| normalize_internal_formula(name, entry, tag))
         .collect();
     let casks = parsed
         .casks
-        .iter()
+        .into_iter()
         .map(|(token, entry)| normalize_internal_cask(token, entry))
         .collect();
 
@@ -844,19 +945,63 @@ fn parse_content_length(headers: &reqwest::header::HeaderMap) -> Option<u64> {
         .filter(|&size| size > 0)
 }
 
+#[derive(Deserialize)]
+struct GhcrTokenResponse {
+    token: Option<String>,
+}
+
+async fn fetch_ghcr_token_async(
+    client: &reqwest::Client,
+    token_url: &str,
+    repositories: &[String],
+    timeout: Duration,
+) -> Option<String> {
+    let params = build_token_query(repositories);
+    let resp = client
+        .get(token_url)
+        .query(&params)
+        .timeout(timeout)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    let body: GhcrTokenResponse = resp.json().await.ok()?;
+    body.token
+}
+
+async fn fetch_ghcr_blob_size_async(
+    client: &reqwest::Client,
+    url: &str,
+    token: &str,
+    timeout: Duration,
+) -> Option<u64> {
+    let resp = client
+        .head(url)
+        .bearer_auth(token)
+        .timeout(timeout)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    parse_content_length(resp.headers())
+}
+
+#[cfg(test)]
 struct GhcrFetcher {
     client: reqwest::Client,
     runtime: tokio::runtime::Runtime,
     token_url: String,
 }
 
+#[cfg(test)]
 impl GhcrFetcher {
-    fn new() -> Option<Self> {
-        Self::with_token_url(GHCR_TOKEN_URL.to_string())
-    }
-
     fn with_token_url(token_url: String) -> Option<Self> {
-        let client = reqwest::Client::builder().build().ok()?;
+        let client = reqwest::Client::builder()
+            .http2_adaptive_window(true)
+            .build()
+            .ok()?;
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -870,39 +1015,24 @@ impl GhcrFetcher {
     }
 }
 
+#[cfg(test)]
 impl BottleFetcher for GhcrFetcher {
     fn fetch_token(&self, repositories: &[String], timeout: Duration) -> Option<String> {
-        let params = build_token_query(repositories);
-        self.runtime.block_on(async {
-            let resp = self
-                .client
-                .get(&self.token_url)
-                .query(&params)
-                .timeout(timeout)
-                .send()
-                .await
-                .ok()?;
-            let resp = resp.error_for_status().ok()?;
-            let body: Value = resp.json().await.ok()?;
-            body.get("token")
-                .and_then(Value::as_str)
-                .map(ToOwned::to_owned)
-        })
+        self.runtime.block_on(fetch_ghcr_token_async(
+            &self.client,
+            &self.token_url,
+            repositories,
+            timeout,
+        ))
     }
 
     fn fetch_blob_size(&self, url: &str, token: &str, timeout: Duration) -> Option<u64> {
-        self.runtime.block_on(async {
-            let resp = self
-                .client
-                .head(url)
-                .bearer_auth(token)
-                .timeout(timeout)
-                .send()
-                .await
-                .ok()?;
-            let resp = resp.error_for_status().ok()?;
-            parse_content_length(resp.headers())
-        })
+        self.runtime.block_on(fetch_ghcr_blob_size_async(
+            &self.client,
+            url,
+            token,
+            timeout,
+        ))
     }
 }
 
@@ -915,21 +1045,114 @@ pub fn default_bottle_size_cache_path() -> PathBuf {
         .join("bottle_sizes.json")
 }
 
+struct MaybePositiveU64(Option<u64>);
+
+impl<'de> Deserialize<'de> for MaybePositiveU64 {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct ValueVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for ValueVisitor {
+            type Value = MaybePositiveU64;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("any JSON value")
+            }
+
+            fn visit_u64<E>(self, v: u64) -> std::result::Result<Self::Value, E> {
+                Ok(MaybePositiveU64((v > 0).then_some(v)))
+            }
+
+            fn visit_i64<E>(self, v: i64) -> std::result::Result<Self::Value, E> {
+                Ok(MaybePositiveU64(u64::try_from(v).ok().filter(|&n| n > 0)))
+            }
+
+            fn visit_f64<E>(self, _v: f64) -> std::result::Result<Self::Value, E> {
+                Ok(MaybePositiveU64(None))
+            }
+
+            fn visit_bool<E>(self, _v: bool) -> std::result::Result<Self::Value, E> {
+                Ok(MaybePositiveU64(None))
+            }
+
+            fn visit_str<E>(self, _v: &str) -> std::result::Result<Self::Value, E> {
+                Ok(MaybePositiveU64(None))
+            }
+
+            fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+                Ok(MaybePositiveU64(None))
+            }
+
+            fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+                Ok(MaybePositiveU64(None))
+            }
+
+            fn visit_seq<A>(self, mut seq: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::SeqAccess<'de>,
+            {
+                while seq.next_element::<serde::de::IgnoredAny>()?.is_some() {}
+                Ok(MaybePositiveU64(None))
+            }
+
+            fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+            where
+                A: serde::de::MapAccess<'de>,
+            {
+                while map
+                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
+                    .is_some()
+                {}
+                Ok(MaybePositiveU64(None))
+            }
+        }
+
+        deserializer.deserialize_any(ValueVisitor)
+    }
+}
+
+struct BottleSizeCache(IndexMap<String, u64>);
+
+impl<'de> Deserialize<'de> for BottleSizeCache {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        struct CacheVisitor;
+
+        impl<'de> serde::de::Visitor<'de> for CacheVisitor {
+            type Value = BottleSizeCache;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                formatter.write_str("a map of bottle digests to byte sizes")
+            }
+
+            fn visit_map<M>(self, mut access: M) -> std::result::Result<Self::Value, M::Error>
+            where
+                M: serde::de::MapAccess<'de>,
+            {
+                let mut map = IndexMap::with_capacity(access.size_hint().unwrap_or(0));
+                while let Some((key, value)) = access.next_entry::<String, MaybePositiveU64>()? {
+                    if let Some(size) = value.0 {
+                        map.insert(key, size);
+                    }
+                }
+                Ok(BottleSizeCache(map))
+            }
+        }
+
+        deserializer.deserialize_map(CacheVisitor)
+    }
+}
+
 /// Load the persisted sha256-to-size cache from disk, dropping non-positive or malformed entries.
 pub fn load_bottle_size_cache(path: &Path) -> IndexMap<String, u64> {
     let Ok(raw) = fs::read_to_string(path) else {
         return IndexMap::new();
     };
-    let Ok(data) = serde_json::from_str::<IndexMap<String, Value>>(&raw) else {
-        return IndexMap::new();
-    };
-
-    data.into_iter()
-        .filter_map(|(digest, value)| {
-            let size = value.as_u64().filter(|&n| n > 0)?;
-            Some((digest, size))
-        })
-        .collect()
+    sonic_rs::from_str::<BottleSizeCache>(&raw).map_or_default(|parsed| parsed.0)
 }
 
 fn write_bottle_size_cache(path: &Path, entries: &IndexMap<&str, u64>) -> io::Result<()> {
@@ -944,7 +1167,11 @@ fn write_bottle_size_cache(path: &Path, entries: &IndexMap<&str, u64>) -> io::Re
     let mut tmp = tempfile::Builder::new()
         .prefix(&prefix)
         .tempfile_in(parent)?;
-    serde_json::to_writer(&mut tmp, entries).map_err(io::Error::other)?;
+    {
+        let mut writer = io::BufWriter::new(&mut tmp);
+        serde_json::to_writer(&mut writer, entries).map_err(io::Error::other)?;
+        writer.flush()?;
+    }
     tmp.persist(path).map_err(|err| err.error)?;
     Ok(())
 }
@@ -963,6 +1190,77 @@ pub fn save_bottle_size_cache(path: &Path, cache: &IndexMap<String, u64>, max_en
     }
 }
 
+async fn resolve_bottle_sizes_async(
+    client: reqwest::Client,
+    pending: Vec<(String, String, String)>,
+    timeout: Duration,
+) -> Vec<(String, Option<u64>)> {
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(ASYNC_MAX_CONCURRENT_REQUESTS));
+    let mut batch_tasks = tokio::task::JoinSet::new();
+
+    for chunk in pending.chunks(TOKEN_SCOPE_BATCH_SIZE) {
+        let batch: Vec<(String, String, String)> = chunk.to_vec();
+        let client = client.clone();
+        let semaphore = Arc::clone(&semaphore);
+
+        batch_tasks.spawn(async move {
+            let mut repos: Vec<String> = batch.iter().map(|(_, _, repo)| repo.clone()).collect();
+            repos.sort();
+            repos.dedup();
+
+            let token = {
+                let Ok(_permit) = semaphore.acquire().await else {
+                    return batch
+                        .into_iter()
+                        .map(|(digest, _, _)| (digest, None))
+                        .collect::<Vec<_>>();
+                };
+                fetch_ghcr_token_async(&client, GHCR_TOKEN_URL, &repos, timeout).await
+            };
+
+            let Some(token) = token else {
+                return batch
+                    .into_iter()
+                    .map(|(digest, _, _)| (digest, None))
+                    .collect::<Vec<_>>();
+            };
+
+            let token = Arc::new(token);
+            let mut head_tasks = tokio::task::JoinSet::new();
+            for (digest, url, _) in batch {
+                let client = client.clone();
+                let semaphore = Arc::clone(&semaphore);
+                let token = Arc::clone(&token);
+                head_tasks.spawn(async move {
+                    let size = match semaphore.acquire().await {
+                        Ok(_permit) => {
+                            fetch_ghcr_blob_size_async(&client, &url, &token, timeout).await
+                        }
+                        Err(_) => None,
+                    };
+                    (digest, size)
+                });
+            }
+
+            let mut results = Vec::with_capacity(head_tasks.len());
+            while let Some(joined) = head_tasks.join_next().await {
+                if let Ok(entry) = joined {
+                    results.push(entry);
+                }
+            }
+            results
+        });
+    }
+
+    let mut all_results = Vec::with_capacity(pending.len());
+    while let Some(joined) = batch_tasks.join_next().await {
+        if let Ok(batch_results) = joined {
+            all_results.extend(batch_results);
+        }
+    }
+    all_results
+}
+
 /// Resolve compressed bottle sizes via `ghcr.io`, updating `cache` in place for successful lookups.
 pub fn resolve_bottle_sizes(
     bottles: &IndexMap<String, String>,
@@ -970,28 +1268,79 @@ pub fn resolve_bottle_sizes(
     max_workers: usize,
     timeout: Duration,
 ) -> HashMap<String, u64> {
-    struct NoopFetcher;
-    impl BottleFetcher for NoopFetcher {
-        fn fetch_token(&self, _repositories: &[String], _timeout: Duration) -> Option<String> {
-            None
+    let _ = max_workers;
+    let mut resolved = HashMap::with_capacity(bottles.len());
+    let mut pending: Vec<(String, String, String)> = Vec::new();
+
+    for (digest, url) in bottles {
+        if let Some(&size) = cache.get(digest) {
+            resolved.insert(digest.clone(), size);
+            continue;
         }
-        fn fetch_blob_size(&self, _url: &str, _token: &str, _timeout: Duration) -> Option<u64> {
-            None
+
+        if let Some(repository) = parse_repository(url) {
+            pending.push((digest.clone(), url.clone(), repository.to_string()));
+        } else {
+            resolved.insert(digest.clone(), 0);
         }
     }
 
-    let needs_network = bottles
-        .iter()
-        .any(|(digest, url)| !cache.contains_key(digest) && parse_repository(url).is_some());
-    if !needs_network {
-        return resolve_bottle_sizes_with(bottles, cache, &NoopFetcher, max_workers, timeout);
+    log::debug!(
+        "Bottle sizes: {} cached or unresolvable, {} to fetch from ghcr.io",
+        bottles.len() - pending.len(),
+        pending.len()
+    );
+    if pending.is_empty() {
+        return resolved;
     }
 
-    if let Some(fetcher) = GhcrFetcher::new() {
-        resolve_bottle_sizes_with(bottles, cache, &fetcher, max_workers, timeout)
-    } else {
-        resolve_bottle_sizes_with(bottles, cache, &NoopFetcher, max_workers, timeout)
+    let pending_count = pending.len();
+    let client_and_rt = reqwest::Client::builder()
+        .http2_adaptive_window(true)
+        .build()
+        .ok()
+        .zip(
+            tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(2)
+                .enable_all()
+                .build()
+                .ok(),
+        );
+
+    let Some((client, runtime)) = client_and_rt else {
+        for (digest, _, _) in pending {
+            resolved.insert(digest, 0);
+        }
+        log::warn!(
+            "Couldn't fetch {pending_count} of {pending_count} bottle sizes from ghcr.io. \
+             They count as 0, so sizes and ratios that depend on them are \
+             understated; run again to retry them."
+        );
+        return resolved;
+    };
+
+    let blob_sizes = runtime.block_on(resolve_bottle_sizes_async(client, pending, timeout));
+    let mut succeeded = 0_usize;
+    for (digest, size) in blob_sizes {
+        if let Some(valid_size) = size.filter(|&s| s > 0) {
+            resolved.insert(digest.clone(), valid_size);
+            cache.insert(digest, valid_size);
+            succeeded += 1;
+        } else {
+            resolved.insert(digest, 0);
+        }
     }
+
+    let failed = pending_count.saturating_sub(succeeded);
+    if failed > 0 {
+        log::warn!(
+            "Couldn't fetch {failed} of {pending_count} bottle sizes from ghcr.io. \
+             They count as 0, so sizes and ratios that depend on them are \
+             understated; run again to retry them."
+        );
+    }
+
+    resolved
 }
 
 /// Resolve compressed bottle sizes using a caller-provided `BottleFetcher`.
@@ -1814,13 +2163,11 @@ mod tests {
 
     #[test]
     fn test_runtime_dependencies_excludes_build_and_test() {
-        let entries = vec![
-            json!("a"),
-            json!({"b": ":build"}),
-            json!({"c": [":build", ":test"]}),
-            json!({"d": ":recommended"}),
-        ];
-        assert_eq!(runtime_dependencies(&entries), vec!["a", "d"]);
+        let entries: Vec<InternalDepEntry> = sonic_rs::from_str(
+            r#"["a", {"b": ":build"}, {"c": [":build", ":test"]}, {"d": ":recommended"}]"#,
+        )
+        .expect("parse dep entries");
+        assert_eq!(runtime_dependencies(entries), vec!["a", "d"]);
     }
 
     #[test]
@@ -2014,7 +2361,7 @@ mod tests {
             let tmp = TempDir::new().expect("tempdir");
             let path = tmp.path().join("x.jws.json");
             fs::write(&path, content).expect("write");
-            assert!(read_jws_payload(&path).is_none());
+            assert!(read_jws_payload_str(&path).is_none());
         }
     }
 
@@ -2363,5 +2710,58 @@ mod tests {
                 stale: BTreeMap::new(),
             }
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_split_physical_sizer_methods_match_keg_sizes() {
+        let tmp = TempDir::new().expect("tempdir");
+        make_rack(
+            tmp.path(),
+            "foo",
+            &[("1.0", 10), ("2.0", 20), ("2.0_1", 30)],
+        );
+        fs::create_dir(tmp.path().join("opt")).expect("mkdir opt");
+        symlink_path(
+            Path::new("../Cellar/foo/2.0_1"),
+            &tmp.path().join("opt").join("foo"),
+        );
+
+        let formula = Formula {
+            name: "foo".to_string(),
+            versions: Some(Versions {
+                stable: Some("2.0".to_string()),
+            }),
+            revision: 1,
+            ..Formula::default()
+        };
+        let sizer = FsSizer;
+        assert_eq!(sizer.current_keg_size(&formula, tmp.path()), 30);
+        assert_eq!(
+            sizer.stale_keg_sizes(&formula, tmp.path()),
+            BTreeMap::from([("1.0".to_string(), 10), ("2.0".to_string(), 20)])
+        );
+    }
+
+    #[test]
+    fn test_load_internal_catalog_uses_from_macos_with_since_clause() {
+        let tmp = TempDir::new().expect("tempdir");
+        let path = tmp.path().join("packages.x86_64_linux.jws.json");
+        let payload = r#"{
+            "formulae": {
+                "demo": {
+                    "stable_dependencies": ["zlib"],
+                    "stable_uses_from_macos": [
+                        ["curl", {"since": ":catalina"}],
+                        [{"bison": ":build"}, {"since": ":big_sur"}]
+                    ]
+                }
+            },
+            "casks": {}
+        }"#;
+        write_jws_raw(&path, payload);
+
+        let catalog = load_internal_catalog(&path, "x86_64_linux").expect("catalog");
+        assert_eq!(catalog.formulae[0].dependencies, vec!["zlib", "curl"]);
     }
 }

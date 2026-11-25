@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use ahash::{AHashMap, AHashSet};
 use indexmap::IndexMap;
 use rayon::prelude::*;
 
@@ -33,97 +34,512 @@ pub struct Topology {
     pub pkg_data: IndexMap<String, PackageData>,
 }
 
-fn require_targets(
-    targets: &[String],
-    graph: &IndexMap<String, Vec<String>>,
-    location: &'static str,
-) -> Result<()> {
-    let missing: Vec<String> = targets
-        .iter()
-        .filter(|t| !graph.contains_key(t.as_str()))
-        .cloned()
+#[derive(Clone, Copy)]
+enum PkgRef<'a> {
+    Formula(&'a Formula),
+    Cask(&'a Cask),
+}
+
+impl<'a> PkgRef<'a> {
+    fn is_requested(self) -> bool {
+        match self {
+            Self::Cask(_) => true,
+            Self::Formula(formula) => formula.installed.iter().any(|k| k.installed_on_request),
+        }
+    }
+
+    fn as_formula(self) -> Option<&'a Formula> {
+        match self {
+            Self::Formula(formula) => Some(formula),
+            Self::Cask(_) => None,
+        }
+    }
+
+    fn to_owned_data(self) -> PackageData {
+        match self {
+            Self::Formula(formula) => PackageData::Formula(formula.clone()),
+            Self::Cask(cask) => PackageData::Cask(cask.clone()),
+        }
+    }
+}
+
+#[inline]
+fn set_bit(bits: &mut [u64], id: usize) {
+    bits[id >> 6] |= 1u64 << (id & 63);
+}
+
+#[inline]
+fn test_bit(bits: &[u64], id: usize) -> bool {
+    (bits[id >> 6] & (1u64 << (id & 63))) != 0
+}
+
+#[inline]
+fn or_bits(dst: &mut [u64], src: &[u64]) {
+    for (d, &s) in dst.iter_mut().zip(src) {
+        *d |= s;
+    }
+}
+
+fn count_bits(bits: &[u64]) -> usize {
+    bits.iter().map(|w| w.count_ones() as usize).sum()
+}
+
+fn iter_bits(bits: &[u64]) -> impl Iterator<Item = usize> + '_ {
+    bits.iter().enumerate().flat_map(|(word_idx, &word)| {
+        let base = word_idx * 64;
+        let mut remaining = word;
+        std::iter::from_fn(move || {
+            if remaining == 0 {
+                return None;
+            }
+            let tz = remaining.trailing_zeros() as usize;
+            remaining &= remaining - 1;
+            Some(base + tz)
+        })
+    })
+}
+
+fn intern_name(
+    name: &str,
+    names: &mut Vec<String>,
+    name_to_id: &mut AHashMap<String, usize>,
+) -> usize {
+    if let Some(&id) = name_to_id.get(name) {
+        return id;
+    }
+    let id = names.len();
+    let owned = name.to_string();
+    names.push(owned.clone());
+    name_to_id.insert(owned, id);
+    id
+}
+
+/// Compute transitive closure bitsets for `0..num_pkgs` via iterative Tarjan SCC.
+///
+/// Tarjan emits SCCs in reverse topological order, so every outgoing edge into
+/// an earlier SCC can OR its already-completed bitset directly into the current
+/// SCC's accumulator.
+fn compute_closure_bits(num_pkgs: usize, words: usize, closure_adj: &[Vec<usize>]) -> Vec<u64> {
+    let mut closure_bits = vec![0u64; num_pkgs * words];
+    if num_pkgs == 0 || words == 0 {
+        return closure_bits;
+    }
+
+    let mut index = vec![usize::MAX; num_pkgs];
+    let mut lowlink = vec![0usize; num_pkgs];
+    let mut on_stack = vec![false; num_pkgs];
+    let mut completed = vec![false; num_pkgs];
+    let mut tarjan_stack: Vec<usize> = Vec::with_capacity(num_pkgs);
+    let mut call_stack: Vec<(usize, usize)> = Vec::new();
+    let mut scc: Vec<usize> = Vec::new();
+    let mut acc = vec![0u64; words];
+    let mut next_index = 0usize;
+
+    for start in 0..num_pkgs {
+        if index[start] != usize::MAX {
+            continue;
+        }
+        index[start] = next_index;
+        lowlink[start] = next_index;
+        next_index += 1;
+        tarjan_stack.push(start);
+        on_stack[start] = true;
+        call_stack.push((start, 0));
+
+        while let Some(&mut (u, ref mut edge_idx)) = call_stack.last_mut() {
+            if *edge_idx < closure_adj[u].len() {
+                let v = closure_adj[u][*edge_idx];
+                *edge_idx += 1;
+                if v >= num_pkgs {
+                    continue;
+                }
+                if index[v] == usize::MAX {
+                    index[v] = next_index;
+                    lowlink[v] = next_index;
+                    next_index += 1;
+                    tarjan_stack.push(v);
+                    on_stack[v] = true;
+                    call_stack.push((v, 0));
+                } else if on_stack[v] {
+                    lowlink[u] = lowlink[u].min(index[v]);
+                }
+            } else {
+                call_stack.pop();
+                if lowlink[u] == index[u] {
+                    scc.clear();
+                    while let Some(w) = tarjan_stack.pop() {
+                        on_stack[w] = false;
+                        scc.push(w);
+                        if w == u {
+                            break;
+                        }
+                    }
+
+                    acc.fill(0);
+                    for &node in &scc {
+                        for &v in &closure_adj[node] {
+                            set_bit(&mut acc, v);
+                            if v < num_pkgs && completed[v] {
+                                let src = &closure_bits[v * words..(v + 1) * words];
+                                or_bits(&mut acc, src);
+                            }
+                        }
+                    }
+                    for &node in &scc {
+                        closure_bits[node * words..(node + 1) * words].copy_from_slice(&acc);
+                        completed[node] = true;
+                    }
+                }
+                if let Some(&(parent, _)) = call_stack.last() {
+                    lowlink[parent] = lowlink[parent].min(lowlink[u]);
+                }
+            }
+        }
+    }
+
+    closure_bits
+}
+
+/// Compact integer-indexed DAG topology borrowing directly from [`BrewMetadata`].
+struct IndexedTopology<'a> {
+    num_pkgs: usize,
+    num_all: usize,
+    words: usize,
+    names: Vec<String>,
+    name_to_id: AHashMap<String, usize>,
+    pkg_data: Vec<PkgRef<'a>>,
+    graph: Vec<Vec<usize>>,
+    closure_bits: Vec<u64>,
+    is_root: Vec<bool>,
+    is_requested: Vec<bool>,
+    sharer_count: Vec<usize>,
+}
+
+fn compute_root_stats(
+    num_pkgs: usize,
+    num_all: usize,
+    words: usize,
+    pkg_data: &[PkgRef<'_>],
+    closure_adj: &[Vec<usize>],
+    closure_bits: &[u64],
+    catalog: bool,
+) -> (Vec<bool>, Vec<bool>, Vec<usize>) {
+    let mut has_dependents = vec![false; num_pkgs];
+    for adj in closure_adj {
+        for &v in adj {
+            if v < num_pkgs {
+                has_dependents[v] = true;
+            }
+        }
+    }
+
+    let is_requested: Vec<bool> = if catalog {
+        vec![false; num_pkgs]
+    } else {
+        pkg_data.iter().map(|p| p.is_requested()).collect()
+    };
+
+    let is_root: Vec<bool> = (0..num_pkgs)
+        .map(|i| !has_dependents[i] || is_requested[i])
         .collect();
+
+    // Only roots share costs: counting intermediate dependencies as sharers
+    // would hand part of each shared package to rows that are never summed.
+    let mut sharer_count = vec![0usize; num_all];
+    let mut root_count = 0usize;
+    let mut req_count = 0usize;
+    for r in 0..num_pkgs {
+        if is_requested[r] {
+            req_count += 1;
+        }
+        if !is_root[r] {
+            continue;
+        }
+        root_count += 1;
+        let row = &closure_bits[r * words..(r + 1) * words];
+        for dep in iter_bits(row) {
+            if dep >= num_pkgs || !is_root[dep] {
+                sharer_count[dep] += 1;
+            }
+        }
+    }
+
+    log::debug!("Roots: {root_count} ({req_count} requested)");
+    (is_root, is_requested, sharer_count)
+}
+
+impl<'a> IndexedTopology<'a> {
+    fn build(metadata: &'a BrewMetadata, catalog: bool) -> Self {
+        // Casks ship no bottles, so the catalog has nothing to size them by;
+        // leaving them in would let unsized casks take shares of formulae.
+        let casks: &[Cask] = if catalog { &[] } else { &metadata.casks };
+        let est_pkgs = metadata.formulae.len() + casks.len();
+
+        let short_names: AHashMap<&str, &str> = metadata
+            .formulae
+            .iter()
+            .map(|f| {
+                let full = f.full_name.as_deref().unwrap_or(f.name.as_str());
+                (full, f.name.as_str())
+            })
+            .collect();
+
+        let mut names: Vec<String> = Vec::with_capacity(est_pkgs);
+        let mut name_to_id: AHashMap<String, usize> = AHashMap::with_capacity(est_pkgs);
+        let mut pkg_data: Vec<PkgRef<'a>> = Vec::with_capacity(est_pkgs);
+
+        for formula in &metadata.formulae {
+            if let Some(&id) = name_to_id.get(&formula.name) {
+                pkg_data[id] = PkgRef::Formula(formula);
+            } else {
+                let id = names.len();
+                names.push(formula.name.clone());
+                name_to_id.insert(formula.name.clone(), id);
+                pkg_data.push(PkgRef::Formula(formula));
+            }
+        }
+
+        for cask in casks {
+            // Formulae and casks share a namespace in the graph; disambiguate
+            // collisions (e.g. the `docker` formula vs. the `docker` cask).
+            let key = if name_to_id.contains_key(&cask.token) {
+                format!("{} (cask)", cask.token)
+            } else {
+                cask.token.clone()
+            };
+            if let Some(&id) = name_to_id.get(&key) {
+                pkg_data[id] = PkgRef::Cask(cask);
+            } else {
+                let id = names.len();
+                names.push(key.clone());
+                name_to_id.insert(key, id);
+                pkg_data.push(PkgRef::Cask(cask));
+            }
+        }
+
+        let num_pkgs = names.len();
+        let (graph, closure_adj) = Self::build_adjacency(
+            num_pkgs,
+            &pkg_data,
+            &short_names,
+            &mut names,
+            &mut name_to_id,
+        );
+
+        log::debug!(
+            "Dependency graph: {num_pkgs} packages ({} casks)",
+            casks.len()
+        );
+
+        let num_all = names.len();
+        let words = num_all.div_ceil(64);
+        let closure_bits = compute_closure_bits(num_pkgs, words, &closure_adj);
+
+        let (is_root, is_requested, sharer_count) = compute_root_stats(
+            num_pkgs,
+            num_all,
+            words,
+            &pkg_data,
+            &closure_adj,
+            &closure_bits,
+            catalog,
+        );
+
+        Self {
+            num_pkgs,
+            num_all,
+            words,
+            names,
+            name_to_id,
+            pkg_data,
+            graph,
+            closure_bits,
+            is_root,
+            is_requested,
+            sharer_count,
+        }
+    }
+
+    fn build_adjacency(
+        num_pkgs: usize,
+        pkg_data: &[PkgRef<'a>],
+        short_names: &AHashMap<&str, &str>,
+        names: &mut Vec<String>,
+        name_to_id: &mut AHashMap<String, usize>,
+    ) -> (Vec<Vec<usize>>, Vec<Vec<usize>>) {
+        let mut graph: Vec<Vec<usize>> = Vec::with_capacity(num_pkgs);
+        let mut closure_adj: Vec<Vec<usize>> = Vec::with_capacity(num_pkgs);
+        let mut seen: AHashSet<usize> = AHashSet::new();
+
+        for &pkg in &pkg_data[..num_pkgs] {
+            seen.clear();
+            match pkg {
+                PkgRef::Formula(formula) => {
+                    // Dependencies on other tap formulae may use the full `user/tap/name`.
+                    let mut deps = Vec::with_capacity(formula.dependencies.len());
+                    let mut closure = Vec::with_capacity(formula.dependencies.len());
+                    for d in &formula.dependencies {
+                        let resolved = short_names.get(d.as_str()).copied().unwrap_or(d.as_str());
+                        let dep_id = intern_name(resolved, names, name_to_id);
+                        deps.push(dep_id);
+                        if seen.insert(dep_id) {
+                            closure.push(dep_id);
+                        }
+                    }
+                    for keg in &formula.installed {
+                        for dep in &keg.runtime_dependencies {
+                            if let Some(full_name) = dep.full_name.as_deref() {
+                                let resolved =
+                                    short_names.get(full_name).copied().unwrap_or(full_name);
+                                let dep_id = intern_name(resolved, names, name_to_id);
+                                if seen.insert(dep_id) {
+                                    closure.push(dep_id);
+                                }
+                            }
+                        }
+                    }
+                    graph.push(deps);
+                    closure_adj.push(closure);
+                }
+                PkgRef::Cask(cask) => {
+                    let cap = cask.depends_on.formula.len() + cask.depends_on.cask.len();
+                    let mut deps = Vec::with_capacity(cap);
+                    let mut closure = Vec::with_capacity(cap);
+                    for d in &cask.depends_on.formula {
+                        let resolved = short_names.get(d.as_str()).copied().unwrap_or(d.as_str());
+                        let dep_id = intern_name(resolved, names, name_to_id);
+                        deps.push(dep_id);
+                        if seen.insert(dep_id) {
+                            closure.push(dep_id);
+                        }
+                    }
+                    for d in &cask.depends_on.cask {
+                        let dep_id = intern_name(d.as_str(), names, name_to_id);
+                        deps.push(dep_id);
+                        if seen.insert(dep_id) {
+                            closure.push(dep_id);
+                        }
+                    }
+                    graph.push(deps);
+                    closure_adj.push(closure);
+                }
+            }
+        }
+
+        (graph, closure_adj)
+    }
+
+    #[inline]
+    fn pkg_id(&self, name: &str) -> Option<usize> {
+        self.name_to_id
+            .get(name)
+            .copied()
+            .filter(|&id| id < self.num_pkgs)
+    }
+
+    #[inline]
+    fn closure_slice(&self, id: usize) -> &[u64] {
+        &self.closure_bits[id * self.words..(id + 1) * self.words]
+    }
+
+    #[inline]
+    fn has_trans_dep(&self, pkg: usize, dep: usize) -> bool {
+        test_bit(self.closure_slice(pkg), dep)
+    }
+
+    #[inline]
+    fn is_root_id(&self, id: usize) -> bool {
+        id < self.num_pkgs && self.is_root[id]
+    }
+
+    fn into_topology(self) -> Topology {
+        let mut graph = IndexMap::with_capacity(self.num_pkgs);
+        let mut pkg_data = IndexMap::with_capacity(self.num_pkgs);
+        let mut trans_deps = HashMap::with_capacity(self.num_pkgs);
+        let mut roots = HashSet::new();
+        let mut requested = HashSet::new();
+
+        for i in 0..self.num_pkgs {
+            let name = self.names[i].clone();
+            let direct: Vec<String> = self.graph[i]
+                .iter()
+                .map(|&d| self.names[d].clone())
+                .collect();
+            let trans: HashSet<String> = iter_bits(self.closure_slice(i))
+                .map(|d| self.names[d].clone())
+                .collect();
+
+            if self.is_root[i] {
+                roots.insert(name.clone());
+            }
+            if self.is_requested[i] {
+                requested.insert(name.clone());
+            }
+
+            graph.insert(name.clone(), direct);
+            pkg_data.insert(name.clone(), self.pkg_data[i].to_owned_data());
+            trans_deps.insert(name, trans);
+        }
+
+        let mut sharer_count = HashMap::new();
+        for (id, &count) in self.sharer_count.iter().enumerate() {
+            if count > 0 {
+                sharer_count.insert(self.names[id].clone(), count);
+            }
+        }
+
+        Topology {
+            graph,
+            trans_deps,
+            roots,
+            requested,
+            sharer_count,
+            pkg_data,
+        }
+    }
+}
+
+fn require_targets_indexed<S: AsRef<str>>(
+    targets: &[S],
+    topo: &IndexedTopology<'_>,
+    location: &'static str,
+) -> Result<Vec<usize>> {
+    let mut ids = Vec::with_capacity(targets.len());
+    let mut missing = Vec::new();
+    for target in targets {
+        let name = target.as_ref();
+        if let Some(id) = topo.pkg_id(name) {
+            ids.push(id);
+        } else {
+            missing.push(name.to_string());
+        }
+    }
     if !missing.is_empty() {
         return Err(DarkMatterError::PackageNotFound {
             packages: missing,
             location,
         });
     }
-    Ok(())
+    Ok(ids)
 }
 
-fn require_catalog_targets(
-    targets: &[String],
-    graph: &IndexMap<String, Vec<String>>,
+fn require_catalog_targets_indexed<S: AsRef<str>>(
+    targets: &[S],
+    topo: &IndexedTopology<'_>,
     metadata: &BrewMetadata,
-) -> Result<()> {
-    let tokens: HashSet<&str> = metadata.casks.iter().map(|c| c.token.as_str()).collect();
+) -> Result<Vec<usize>> {
+    let tokens: AHashSet<&str> = metadata.casks.iter().map(|c| c.token.as_str()).collect();
     let casks: Vec<String> = targets
         .iter()
-        .filter(|t| !graph.contains_key(t.as_str()) && tokens.contains(t.as_str()))
-        .cloned()
+        .filter_map(|t| {
+            let name = t.as_ref();
+            (topo.pkg_id(name).is_none() && tokens.contains(name)).then(|| name.to_string())
+        })
         .collect();
     if !casks.is_empty() {
         return Err(DarkMatterError::CaskInCatalog { casks });
     }
-    require_targets(targets, graph, CATALOG)
-}
-
-fn recorded_dependencies(formula: &Formula, short_names: &HashMap<&str, &str>) -> Vec<String> {
-    formula
-        .installed
-        .iter()
-        .flat_map(|keg| keg.runtime_dependencies.iter())
-        .filter_map(|dep| dep.full_name.as_deref())
-        .map(|full_name| {
-            short_names
-                .get(full_name)
-                .copied()
-                .unwrap_or(full_name)
-                .to_string()
-        })
-        .collect()
-}
-
-fn dedup_preserve_order(items: impl IntoIterator<Item = String>) -> Vec<String> {
-    let mut seen = HashSet::new();
-    let mut out = Vec::new();
-    for item in items {
-        if seen.insert(item.clone()) {
-            out.push(item);
-        }
-    }
-    out
-}
-
-fn identify_roots(
-    trans_deps: &HashMap<String, HashSet<String>>,
-    pkg_data_map: &IndexMap<String, PackageData>,
-    catalog: bool,
-) -> (HashSet<String>, HashSet<String>) {
-    let has_dependents: HashSet<&str> = trans_deps
-        .values()
-        .flat_map(|deps| deps.iter().map(String::as_str))
-        .collect();
-
-    let unreferenced: HashSet<String> = trans_deps
-        .keys()
-        .filter(|pkg| !has_dependents.contains(pkg.as_str()))
-        .cloned()
-        .collect();
-
-    if catalog {
-        return (unreferenced, HashSet::new());
-    }
-
-    let requested: HashSet<String> = pkg_data_map
-        .iter()
-        .filter(|(_, data)| data.is_requested())
-        .map(|(pkg, _)| pkg.clone())
-        .collect();
-
-    let roots = unreferenced.union(&requested).cloned().collect();
-    (roots, requested)
+    require_targets_indexed(targets, topo, CATALOG)
 }
 
 /// Recursively traverse the dependency graph to extract all transitive dependencies.
@@ -152,154 +568,57 @@ fn collect_dependencies(
 
 /// Parse metadata and pre-compute the immutable DAG properties.
 pub fn build_global_topology(metadata: &BrewMetadata, catalog: bool) -> Topology {
-    let mut dependency_graph: IndexMap<String, Vec<String>> = IndexMap::new();
-    let mut pkg_data_map: IndexMap<String, PackageData> = IndexMap::new();
-    let mut closure_graph: IndexMap<String, Vec<String>> = IndexMap::new();
-
-    let short_names: HashMap<&str, &str> = metadata
-        .formulae
-        .iter()
-        .map(|f| {
-            let full = f.full_name.as_deref().unwrap_or(f.name.as_str());
-            (full, f.name.as_str())
-        })
-        .collect();
-
-    for formula in &metadata.formulae {
-        let name = formula.name.clone();
-        // Dependencies on other tap formulae may use the full `user/tap/name`.
-        let deps: Vec<String> = formula
-            .dependencies
-            .iter()
-            .map(|d| {
-                short_names
-                    .get(d.as_str())
-                    .copied()
-                    .unwrap_or(d.as_str())
-                    .to_string()
-            })
-            .collect();
-        let recorded = recorded_dependencies(formula, &short_names);
-        let closure = dedup_preserve_order(deps.iter().cloned().chain(recorded));
-
-        dependency_graph.insert(name.clone(), deps);
-        closure_graph.insert(name.clone(), closure);
-        pkg_data_map.insert(name, PackageData::Formula(formula.clone()));
-    }
-
-    // Casks ship no bottles, so the catalog has nothing to size them by;
-    // leaving them in would let unsized casks take shares of formulae.
-    let casks: &[Cask] = if catalog { &[] } else { &metadata.casks };
-    for cask in casks {
-        // Formulae and casks share a namespace in the graph; disambiguate
-        // collisions (e.g. the `docker` formula vs. the `docker` cask).
-        let key = if dependency_graph.contains_key(&cask.token) {
-            format!("{} (cask)", cask.token)
-        } else {
-            cask.token.clone()
-        };
-
-        let deps: Vec<String> = cask
-            .depends_on
-            .formula
-            .iter()
-            .map(|d| {
-                short_names
-                    .get(d.as_str())
-                    .copied()
-                    .unwrap_or(d.as_str())
-                    .to_string()
-            })
-            .chain(cask.depends_on.cask.iter().cloned())
-            .collect();
-
-        closure_graph.insert(key.clone(), deps.clone());
-        dependency_graph.insert(key.clone(), deps);
-        pkg_data_map.insert(key, PackageData::Cask(cask.clone()));
-    }
-
-    log::debug!(
-        "Dependency graph: {} packages ({} casks)",
-        dependency_graph.len(),
-        casks.len()
-    );
-
-    let trans_deps: HashMap<String, HashSet<String>> = closure_graph
-        .keys()
-        .map(|pkg| (pkg.clone(), get_all_dependencies(pkg, &closure_graph)))
-        .collect();
-
-    let (roots, requested) = identify_roots(&trans_deps, &pkg_data_map, catalog);
-
-    // Only roots share costs: counting intermediate dependencies as sharers
-    // would hand part of each shared package to rows that are never summed.
-    let mut sharer_count: HashMap<String, usize> = HashMap::new();
-    for root in &roots {
-        if let Some(deps) = trans_deps.get(root) {
-            for dep in deps {
-                if !roots.contains(dep) {
-                    *sharer_count.entry(dep.clone()).or_insert(0) += 1;
-                }
-            }
-        }
-    }
-
-    log::debug!("Roots: {} ({} requested)", roots.len(), requested.len());
-
-    Topology {
-        graph: dependency_graph,
-        trans_deps,
-        roots,
-        requested,
-        sharer_count,
-        pkg_data: pkg_data_map,
-    }
+    IndexedTopology::build(metadata, catalog).into_topology()
 }
 
-fn resolve_physical_sizes(
-    pkg_data_map: &IndexMap<String, PackageData>,
-    prefix: &Path,
-    sizer: &dyn PhysicalSizer,
-) -> HashMap<String, u64> {
-    let entries: Vec<(&String, &PackageData)> = pkg_data_map.iter().collect();
-    entries
-        .into_par_iter()
-        .map(|(name, pkg)| (name.clone(), measure_package(pkg, prefix, sizer)))
-        .collect()
-}
-
-fn resolve_physical_sizes_subset(
-    pkg_data_map: &IndexMap<String, PackageData>,
-    names: &[String],
-    prefix: &Path,
-    sizer: &dyn PhysicalSizer,
-) -> HashMap<String, u64> {
-    names
-        .par_iter()
-        .filter_map(|name| {
-            pkg_data_map
-                .get(name)
-                .map(|pkg| (name.clone(), measure_package(pkg, prefix, sizer)))
-        })
-        .collect()
-}
-
-fn closure_names(targets: &[String], topo: &Topology) -> Vec<String> {
-    let mut set: HashSet<String> = targets.iter().cloned().collect();
-    for target in targets {
-        if let Some(deps) = topo.trans_deps.get(target) {
-            set.extend(deps.iter().cloned());
-        }
-    }
-    set.into_iter().collect()
-}
-
-fn measure_package(pkg: &PackageData, prefix: &Path, sizer: &dyn PhysicalSizer) -> u64 {
+fn measure_package(pkg: PkgRef<'_>, prefix: &Path, sizer: &dyn PhysicalSizer) -> u64 {
     match pkg {
-        PackageData::Cask(cask) => sizer.cask_size(cask, prefix),
+        PkgRef::Cask(cask) => sizer.cask_size(cask, prefix),
         // Older kegs are cleanup debris, not part of the package's cost.
-        PackageData::Formula(formula) => sizer.keg_sizes(formula, prefix).current,
+        PkgRef::Formula(formula) => sizer.current_keg_size(formula, prefix),
     }
+}
+
+fn resolve_physical_sizes_indexed(
+    topo: &IndexedTopology<'_>,
+    prefix: &Path,
+    sizer: &dyn PhysicalSizer,
+) -> Vec<u64> {
+    let mut byte_sizes = vec![0u64; topo.num_all];
+    let measured: Vec<u64> = topo.pkg_data[..topo.num_pkgs]
+        .par_iter()
+        .map(|&pkg| measure_package(pkg, prefix, sizer))
+        .collect();
+    byte_sizes[..topo.num_pkgs].copy_from_slice(&measured);
+    byte_sizes
+}
+
+fn resolve_physical_sizes_subset_indexed(
+    topo: &IndexedTopology<'_>,
+    ids: &[usize],
+    prefix: &Path,
+    sizer: &dyn PhysicalSizer,
+) -> Vec<u64> {
+    let mut byte_sizes = vec![0u64; topo.num_all];
+    let measured: Vec<(usize, u64)> = ids
+        .par_iter()
+        .copied()
+        .filter(|&id| id < topo.num_pkgs)
+        .map(|id| (id, measure_package(topo.pkg_data[id], prefix, sizer)))
+        .collect();
+    for (id, bytes) in measured {
+        byte_sizes[id] = bytes;
+    }
+    byte_sizes
+}
+
+fn closure_ids(target_ids: &[usize], topo: &IndexedTopology<'_>) -> Vec<usize> {
+    let mut bits = vec![0u64; topo.words];
+    for &id in target_ids {
+        set_bit(&mut bits, id);
+        or_bits(&mut bits, topo.closure_slice(id));
+    }
+    iter_bits(&bits).collect()
 }
 
 /// Pick the bottle Homebrew would pour for `tag`.
@@ -333,24 +652,24 @@ pub fn select_bottle_file<'a>(
     None
 }
 
-fn resolve_theoretical_sizes(
-    resolution_set: &HashSet<String>,
-    pkg_data_map: &IndexMap<String, PackageData>,
+fn resolve_theoretical_sizes_indexed(
+    resolution_ids: &[usize],
+    topo: &IndexedTopology<'_>,
     arch: Option<&str>,
     sizer: &dyn TheoreticalSizer,
-) -> HashMap<String, u64> {
+) -> Vec<u64> {
     let tag = arch
         .filter(|a| !a.is_empty())
         .map_or_else(|| sizer.detect_bottle_tag(), str::to_owned);
 
-    let mut package_digest: HashMap<String, String> = HashMap::new();
+    let mut package_digest: Vec<(usize, &str)> = Vec::new();
     let mut bottles: IndexMap<String, String> = IndexMap::new();
 
-    for (name, pkg) in pkg_data_map {
-        if !resolution_set.contains(name) {
+    for &id in resolution_ids {
+        if id >= topo.num_pkgs {
             continue;
         }
-        let Some(formula) = pkg.as_formula() else {
+        let Some(formula) = topo.pkg_data[id].as_formula() else {
             continue;
         };
         let Some(files) = formula
@@ -366,58 +685,52 @@ fn resolve_theoretical_sizes(
             && !file_info.sha256.is_empty()
             && !file_info.url.is_empty()
         {
-            package_digest.insert(name.clone(), file_info.sha256.clone());
+            package_digest.push((id, file_info.sha256.as_str()));
             bottles.insert(file_info.sha256.clone(), file_info.url.clone());
         }
     }
 
-    let unbottled = resolution_set.len().saturating_sub(package_digest.len());
+    let unbottled = resolution_ids.len().saturating_sub(package_digest.len());
     if unbottled > 0 {
         log::debug!("{unbottled} package(s) have no {tag} bottle; they count as 0");
     }
 
     let resolved_sizes = sizer.resolve_bottle_sizes(&bottles);
-    package_digest
-        .into_iter()
-        .map(|(name, digest)| {
-            let size = resolved_sizes.get(&digest).copied().unwrap_or(0);
-            (name, size)
-        })
-        .collect()
+    let mut byte_sizes = vec![0u64; topo.num_all];
+    for (id, digest) in package_digest {
+        byte_sizes[id] = resolved_sizes.get(digest).copied().unwrap_or(0);
+    }
+    byte_sizes
 }
 
-fn attributed_size(dep: &str, size_map: &HashMap<String, u64>, topo: &Topology) -> f64 {
-    if topo.roots.contains(dep) {
+#[inline]
+fn attributed_size_indexed(dep_id: usize, sizes: &[u64], topo: &IndexedTopology<'_>) -> f64 {
+    if topo.is_root_id(dep_id) {
         return 0.0;
     }
-    let size = size_map.get(dep).copied().unwrap_or(0);
-    let sharers = topo.sharer_count.get(dep).copied().unwrap_or(1).max(1);
+    let size = sizes[dep_id];
+    let sharers = topo.sharer_count[dep_id].max(1);
     size as f64 / sharers as f64
 }
 
-fn compute_bloat_metrics<S: AsRef<str>>(
-    targets: &[S],
-    size_map: &HashMap<String, u64>,
-    topo: &Topology,
+fn compute_bloat_metrics_indexed(
+    target_ids: &[usize],
+    sizes: &[u64],
+    topo: &IndexedTopology<'_>,
 ) -> Vec<BloatRow> {
-    targets
+    target_ids
         .iter()
-        .map(|target| {
-            let target = target.as_ref();
-            let core_bytes = size_map.get(target).copied().unwrap_or(0);
-            let target_deps = topo.trans_deps.get(target);
-            let dep_count = target_deps.map_or(0, HashSet::len);
+        .map(|&target_id| {
+            let core_bytes = sizes[target_id];
+            let closure = topo.closure_slice(target_id);
+            let dep_count = count_bits(closure);
 
-            let dep_standard: u64 = target_deps.map_or(0, |deps| {
-                deps.iter()
-                    .map(|d| size_map.get(d.as_str()).copied().unwrap_or(0))
-                    .sum()
-            });
-            let dep_weighted: f64 = target_deps.map_or(0.0, |deps| {
-                deps.iter()
-                    .map(|d| attributed_size(d, size_map, topo))
-                    .sum()
-            });
+            let mut dep_standard: u64 = 0;
+            let mut dep_weighted: f64 = 0.0;
+            for dep_id in iter_bits(closure) {
+                dep_standard += sizes[dep_id];
+                dep_weighted += attributed_size_indexed(dep_id, sizes, topo);
+            }
 
             let standard_bytes = core_bytes + dep_standard;
             let weighted_bytes = core_bytes as f64 + dep_weighted;
@@ -429,65 +742,62 @@ fn compute_bloat_metrics<S: AsRef<str>>(
             };
 
             BloatRow {
-                package: target.to_string(),
+                package: topo.names[target_id].clone(),
                 core_bytes,
                 standard_bytes,
                 weighted_bytes,
                 bloat_ratio,
                 dep_count,
-                is_root: topo.roots.contains(target),
-                is_requested: topo.requested.contains(target),
+                is_root: topo.is_root[target_id],
+                is_requested: topo.is_requested[target_id],
             }
         })
         .collect()
 }
 
-fn compute_explain_metrics(
-    target: &str,
-    size_map: &HashMap<String, u64>,
-    topo: &Topology,
+fn compute_explain_metrics_indexed(
+    target_id: usize,
+    sizes: &[u64],
+    topo: &IndexedTopology<'_>,
 ) -> Vec<ExplainRow> {
-    let Some(target_deps) = topo.trans_deps.get(target) else {
-        return Vec::new();
-    };
-    if target_deps.is_empty() {
+    let closure = topo.closure_slice(target_id);
+    if count_bits(closure) == 0 {
         return Vec::new();
     }
 
-    let mut subgraph: HashSet<&str> = target_deps.iter().map(String::as_str).collect();
-    subgraph.insert(target);
+    let mut subgraph_bits = closure.to_vec();
+    set_bit(&mut subgraph_bits, target_id);
+    let subgraph_pkgs: Vec<usize> = iter_bits(&subgraph_bits)
+        .take_while(|&p| p < topo.num_pkgs)
+        .collect();
 
-    let mut rows: Vec<ExplainRow> = target_deps
-        .iter()
-        .map(|dep| {
-            let size_bytes = size_map.get(dep.as_str()).copied().unwrap_or(0);
-            let is_root = topo.roots.contains(dep.as_str());
+    let mut rows: Vec<ExplainRow> = iter_bits(closure)
+        .map(|dep_id| {
+            let size_bytes = sizes[dep_id];
+            let is_root = topo.is_root_id(dep_id);
             let shared_by = if is_root {
                 0
             } else {
-                topo.sharer_count.get(dep.as_str()).copied().unwrap_or(1)
+                topo.sharer_count[dep_id].max(1)
             };
-            let attributed_bytes = attributed_size(dep, size_map, topo);
+            let attributed_bytes = attributed_size_indexed(dep_id, sizes, topo);
 
             // Direct dependents within the target's closure, for tree views. A
             // dependency known only from a keg's install record has no declared
             // parent, so it hangs off the target.
-            let mut required_by: Vec<String> = subgraph
+            let mut required_by: Vec<String> = subgraph_pkgs
                 .iter()
-                .filter(|&&p| {
-                    topo.graph
-                        .get(p)
-                        .is_some_and(|deps| deps.iter().any(|d| d == dep))
-                })
-                .map(|&p| p.to_string())
+                .copied()
+                .filter(|&p| topo.graph[p].contains(&dep_id))
+                .map(|p| topo.names[p].clone())
                 .collect();
             required_by.sort();
             if required_by.is_empty() {
-                required_by.push(target.to_string());
+                required_by.push(topo.names[target_id].clone());
             }
 
             ExplainRow {
-                dependency: dep.clone(),
+                dependency: topo.names[dep_id].clone(),
                 size_bytes,
                 shared_by,
                 attributed_bytes,
@@ -506,8 +816,8 @@ fn compute_explain_metrics(
     rows
 }
 
-fn log_conservation(rows: &[BloatRow], size_map: &HashMap<String, u64>) {
-    let total: u64 = size_map.values().sum();
+fn log_conservation_indexed(rows: &[BloatRow], sizes: &[u64]) {
+    let total: u64 = sizes.iter().copied().sum();
     let attributed: f64 = rows
         .iter()
         .filter(|row| row.is_root)
@@ -531,12 +841,12 @@ pub fn build_analysis_with(
     prefix: &Path,
     sizer: &dyn PhysicalSizer,
 ) -> Vec<BloatRow> {
-    let topo = build_global_topology(metadata, false);
-    let size_map = resolve_physical_sizes(&topo.pkg_data, prefix, sizer);
-    let targets: Vec<&str> = topo.graph.keys().map(String::as_str).collect();
+    let topo = IndexedTopology::build(metadata, false);
+    let byte_sizes = resolve_physical_sizes_indexed(&topo, prefix, sizer);
+    let target_ids: Vec<usize> = (0..topo.num_pkgs).collect();
 
-    let rows = compute_bloat_metrics(&targets, &size_map, &topo);
-    log_conservation(&rows, &size_map);
+    let rows = compute_bloat_metrics_indexed(&target_ids, &byte_sizes, &topo);
+    log_conservation_indexed(&rows, &byte_sizes);
     rows
 }
 
@@ -556,13 +866,16 @@ pub fn build_targeted_analysis_with(
     target: &str,
     sizer: &dyn PhysicalSizer,
 ) -> Result<Vec<BloatRow>> {
-    let topo = build_global_topology(metadata, false);
-    let targets = [target.to_string()];
-    require_targets(&targets, &topo.graph, INSTALLED)?;
+    let topo = IndexedTopology::build(metadata, false);
+    let target_ids = require_targets_indexed(&[target], &topo, INSTALLED)?;
 
-    let scope = closure_names(&targets, &topo);
-    let size_map = resolve_physical_sizes_subset(&topo.pkg_data, &scope, prefix, sizer);
-    Ok(compute_bloat_metrics(&targets, &size_map, &topo))
+    let scope = closure_ids(&target_ids, &topo);
+    let byte_sizes = resolve_physical_sizes_subset_indexed(&topo, &scope, prefix, sizer);
+    Ok(compute_bloat_metrics_indexed(
+        &target_ids,
+        &byte_sizes,
+        &topo,
+    ))
 }
 
 /// Construct bloat metrics for comparing multiple installed targets.
@@ -581,12 +894,16 @@ pub fn build_compare_analysis_with(
     targets: &[String],
     sizer: &dyn PhysicalSizer,
 ) -> Result<Vec<BloatRow>> {
-    let topo = build_global_topology(metadata, false);
-    require_targets(targets, &topo.graph, INSTALLED)?;
+    let topo = IndexedTopology::build(metadata, false);
+    let target_ids = require_targets_indexed(targets, &topo, INSTALLED)?;
 
-    let scope = closure_names(targets, &topo);
-    let size_map = resolve_physical_sizes_subset(&topo.pkg_data, &scope, prefix, sizer);
-    Ok(compute_bloat_metrics(targets, &size_map, &topo))
+    let scope = closure_ids(&target_ids, &topo);
+    let byte_sizes = resolve_physical_sizes_subset_indexed(&topo, &scope, prefix, sizer);
+    Ok(compute_bloat_metrics_indexed(
+        &target_ids,
+        &byte_sizes,
+        &topo,
+    ))
 }
 
 /// Construct a dependency attribution breakdown for a physical target.
@@ -605,13 +922,16 @@ pub fn build_explain_analysis_with(
     target: &str,
     sizer: &dyn PhysicalSizer,
 ) -> Result<Vec<ExplainRow>> {
-    let topo = build_global_topology(metadata, false);
-    let targets = [target.to_string()];
-    require_targets(&targets, &topo.graph, INSTALLED)?;
+    let topo = IndexedTopology::build(metadata, false);
+    let target_ids = require_targets_indexed(&[target], &topo, INSTALLED)?;
 
-    let scope = closure_names(&targets, &topo);
-    let size_map = resolve_physical_sizes_subset(&topo.pkg_data, &scope, prefix, sizer);
-    Ok(compute_explain_metrics(target, &size_map, &topo))
+    let scope = closure_ids(&target_ids, &topo);
+    let byte_sizes = resolve_physical_sizes_subset_indexed(&topo, &scope, prefix, sizer);
+    Ok(compute_explain_metrics_indexed(
+        target_ids[0],
+        &byte_sizes,
+        &topo,
+    ))
 }
 
 /// Construct the ecosystem-wide theoretical leaderboard.
@@ -625,13 +945,12 @@ pub fn build_theoretical_with(
     arch: Option<&str>,
     sizer: &dyn TheoreticalSizer,
 ) -> Vec<BloatRow> {
-    let topo = build_global_topology(metadata, true);
-    let resolution_set: HashSet<String> = topo.graph.keys().cloned().collect();
-    let size_map = resolve_theoretical_sizes(&resolution_set, &topo.pkg_data, arch, sizer);
-    let targets: Vec<&str> = topo.graph.keys().map(String::as_str).collect();
+    let topo = IndexedTopology::build(metadata, true);
+    let resolution_ids: Vec<usize> = (0..topo.num_pkgs).collect();
+    let byte_sizes = resolve_theoretical_sizes_indexed(&resolution_ids, &topo, arch, sizer);
 
-    let rows = compute_bloat_metrics(&targets, &size_map, &topo);
-    log_conservation(&rows, &size_map);
+    let rows = compute_bloat_metrics_indexed(&resolution_ids, &byte_sizes, &topo);
+    log_conservation_indexed(&rows, &byte_sizes);
     rows
 }
 
@@ -651,15 +970,16 @@ pub fn build_targeted_theoretical_with(
     arch: Option<&str>,
     sizer: &dyn TheoreticalSizer,
 ) -> Result<Vec<BloatRow>> {
-    let topo = build_global_topology(metadata, true);
-    let targets = [target.to_string()];
-    require_catalog_targets(&targets, &topo.graph, metadata)?;
+    let topo = IndexedTopology::build(metadata, true);
+    let target_ids = require_catalog_targets_indexed(&[target], &topo, metadata)?;
 
-    let mut resolution_set = topo.trans_deps.get(target).cloned().unwrap_or_default();
-    resolution_set.insert(target.to_string());
-
-    let size_map = resolve_theoretical_sizes(&resolution_set, &topo.pkg_data, arch, sizer);
-    Ok(compute_bloat_metrics(&targets, &size_map, &topo))
+    let scope = closure_ids(&target_ids, &topo);
+    let byte_sizes = resolve_theoretical_sizes_indexed(&scope, &topo, arch, sizer);
+    Ok(compute_bloat_metrics_indexed(
+        &target_ids,
+        &byte_sizes,
+        &topo,
+    ))
 }
 
 /// Construct theoretical bloat metrics for multiple targets by resolving their unioned closure.
@@ -678,18 +998,16 @@ pub fn build_compare_theoretical_with(
     arch: Option<&str>,
     sizer: &dyn TheoreticalSizer,
 ) -> Result<Vec<BloatRow>> {
-    let topo = build_global_topology(metadata, true);
-    require_catalog_targets(targets, &topo.graph, metadata)?;
+    let topo = IndexedTopology::build(metadata, true);
+    let target_ids = require_catalog_targets_indexed(targets, &topo, metadata)?;
 
-    let mut resolution_set: HashSet<String> = targets.iter().cloned().collect();
-    for target in targets {
-        if let Some(deps) = topo.trans_deps.get(target) {
-            resolution_set.extend(deps.iter().cloned());
-        }
-    }
-
-    let size_map = resolve_theoretical_sizes(&resolution_set, &topo.pkg_data, arch, sizer);
-    Ok(compute_bloat_metrics(targets, &size_map, &topo))
+    let scope = closure_ids(&target_ids, &topo);
+    let byte_sizes = resolve_theoretical_sizes_indexed(&scope, &topo, arch, sizer);
+    Ok(compute_bloat_metrics_indexed(
+        &target_ids,
+        &byte_sizes,
+        &topo,
+    ))
 }
 
 /// Construct a dependency attribution breakdown using theoretical bottle metrics.
@@ -708,51 +1026,39 @@ pub fn build_explain_theoretical_with(
     arch: Option<&str>,
     sizer: &dyn TheoreticalSizer,
 ) -> Result<Vec<ExplainRow>> {
-    let topo = build_global_topology(metadata, true);
-    let targets = [target.to_string()];
-    require_catalog_targets(&targets, &topo.graph, metadata)?;
+    let topo = IndexedTopology::build(metadata, true);
+    let target_ids = require_catalog_targets_indexed(&[target], &topo, metadata)?;
 
-    let mut resolution_set = topo.trans_deps.get(target).cloned().unwrap_or_default();
-    resolution_set.insert(target.to_string());
-
-    let size_map = resolve_theoretical_sizes(&resolution_set, &topo.pkg_data, arch, sizer);
-    Ok(compute_explain_metrics(target, &size_map, &topo))
+    let scope = closure_ids(&target_ids, &topo);
+    let byte_sizes = resolve_theoretical_sizes_indexed(&scope, &topo, arch, sizer);
+    Ok(compute_explain_metrics_indexed(
+        target_ids[0],
+        &byte_sizes,
+        &topo,
+    ))
 }
 
-fn retained(topo: &Topology, anchors: &HashSet<String>) -> HashSet<String> {
-    let mut kept = anchors.clone();
-    for anchor in anchors {
-        if let Some(deps) = topo.trans_deps.get(anchor) {
-            kept.extend(deps.iter().cloned());
-        }
-    }
-    kept.retain(|pkg| topo.graph.contains_key(pkg));
-    kept
-}
-
-fn dependents(topo: &Topology, pkg: &str, among: &HashSet<String>) -> Vec<String> {
-    let mut direct: Vec<String> = among
+fn dependents_indexed(
+    topo: &IndexedTopology<'_>,
+    pkg_id: usize,
+    among_pkgs: &[usize],
+) -> Vec<String> {
+    let mut direct: Vec<String> = among_pkgs
         .iter()
-        .filter(|p| {
-            topo.graph
-                .get(p.as_str())
-                .is_some_and(|deps| deps.iter().any(|d| d == pkg))
-        })
-        .cloned()
+        .copied()
+        .filter(|&p| topo.graph[p].contains(&pkg_id))
+        .map(|p| topo.names[p].clone())
         .collect();
     if !direct.is_empty() {
         direct.sort();
         return direct;
     }
 
-    let mut transitive: Vec<String> = among
+    let mut transitive: Vec<String> = among_pkgs
         .iter()
-        .filter(|p| {
-            topo.trans_deps
-                .get(p.as_str())
-                .is_some_and(|deps| deps.contains(pkg))
-        })
-        .cloned()
+        .copied()
+        .filter(|&p| topo.has_trans_dep(p, pkg_id))
+        .map(|p| topo.names[p].clone())
         .collect();
     transitive.sort();
     transitive
@@ -777,43 +1083,49 @@ pub fn build_reclaim_with(
     targets: &[String],
     sizer: &dyn PhysicalSizer,
 ) -> Result<ReclaimResult> {
-    let topo = build_global_topology(metadata, false);
-    require_targets(targets, &topo.graph, INSTALLED)?;
+    let topo = IndexedTopology::build(metadata, false);
+    let target_ids = require_targets_indexed(targets, &topo, INSTALLED)?;
 
-    let target_set: HashSet<&str> = targets.iter().map(String::as_str).collect();
-    let remaining_roots: HashSet<String> = topo
-        .roots
-        .iter()
-        .filter(|r| !target_set.contains(r.as_str()))
-        .cloned()
-        .collect();
+    let mut is_target = vec![false; topo.num_pkgs];
+    for &id in &target_ids {
+        is_target[id] = true;
+    }
 
-    let kept = retained(&topo, &remaining_roots);
-    let freed_names: Vec<String> = topo
-        .graph
-        .keys()
-        .filter(|k| !kept.contains(k.as_str()))
-        .cloned()
-        .collect();
-
-    let mut blocked = BTreeMap::new();
-    for target in targets {
-        if kept.contains(target) {
-            blocked.insert(target.clone(), dependents(&topo, target, &kept));
+    let mut kept_bits = vec![0u64; topo.words];
+    for (r, (&root, &targeted)) in topo.is_root.iter().zip(&is_target).enumerate() {
+        if root && !targeted {
+            set_bit(&mut kept_bits, r);
+            or_bits(&mut kept_bits, topo.closure_slice(r));
         }
     }
 
-    let size_map = resolve_physical_sizes_subset(&topo.pkg_data, &freed_names, prefix, sizer);
-    let mut freed: Vec<ReclaimRow> = freed_names
+    let mut freed_ids = Vec::new();
+    let mut kept_pkgs = Vec::new();
+    for id in 0..topo.num_pkgs {
+        if test_bit(&kept_bits, id) {
+            kept_pkgs.push(id);
+        } else {
+            freed_ids.push(id);
+        }
+    }
+
+    let mut blocked = BTreeMap::new();
+    for &tid in &target_ids {
+        if test_bit(&kept_bits, tid) {
+            blocked.insert(
+                topo.names[tid].clone(),
+                dependents_indexed(&topo, tid, &kept_pkgs),
+            );
+        }
+    }
+
+    let byte_sizes = resolve_physical_sizes_subset_indexed(&topo, &freed_ids, prefix, sizer);
+    let mut freed: Vec<ReclaimRow> = freed_ids
         .into_iter()
-        .map(|name| {
-            let core_bytes = size_map.get(&name).copied().unwrap_or(0);
-            let is_target = target_set.contains(name.as_str());
-            ReclaimRow {
-                package: name,
-                core_bytes,
-                is_target,
-            }
+        .map(|id| ReclaimRow {
+            package: topo.names[id].clone(),
+            core_bytes: byte_sizes[id],
+            is_target: is_target[id],
         })
         .collect();
     freed.sort_by(|a, b| {
@@ -836,28 +1148,28 @@ pub fn build_orphans_with(
     prefix: &Path,
     sizer: &dyn PhysicalSizer,
 ) -> Vec<OrphanRow> {
-    let topo = build_global_topology(metadata, false);
-    let kept = retained(&topo, &topo.requested);
-    let orphans: HashSet<String> = topo
-        .graph
-        .keys()
-        .filter(|k| !kept.contains(k.as_str()))
-        .cloned()
+    let topo = IndexedTopology::build(metadata, false);
+    let mut kept_bits = vec![0u64; topo.words];
+    for (r, &requested) in topo.is_requested.iter().enumerate() {
+        if requested {
+            set_bit(&mut kept_bits, r);
+            or_bits(&mut kept_bits, topo.closure_slice(r));
+        }
+    }
+
+    let orphan_ids: Vec<usize> = (0..topo.num_pkgs)
+        .filter(|&id| !test_bit(&kept_bits, id))
         .collect();
 
-    let orphan_list: Vec<String> = orphans.iter().cloned().collect();
-    let size_map = resolve_physical_sizes_subset(&topo.pkg_data, &orphan_list, prefix, sizer);
+    let byte_sizes = resolve_physical_sizes_subset_indexed(&topo, &orphan_ids, prefix, sizer);
 
-    let mut rows: Vec<OrphanRow> = orphan_list
-        .into_iter()
-        .map(|name| {
-            let core_bytes = size_map.get(&name).copied().unwrap_or(0);
-            let required_by = dependents(&topo, &name, &orphans);
-            OrphanRow {
-                package: name,
-                core_bytes,
-                required_by,
-            }
+    let mut rows: Vec<OrphanRow> = orphan_ids
+        .iter()
+        .copied()
+        .map(|id| OrphanRow {
+            package: topo.names[id].clone(),
+            core_bytes: byte_sizes[id],
+            required_by: dependents_indexed(&topo, id, &orphan_ids),
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -883,15 +1195,13 @@ pub fn build_cleanup_with(
         .formulae
         .par_iter()
         .flat_map_iter(|formula| {
-            let kegs = sizer.keg_sizes(formula, prefix);
+            let stale = sizer.stale_keg_sizes(formula, prefix);
             let pkg = formula.name.clone();
-            kegs.stale
-                .into_iter()
-                .map(move |(version, bytes)| CleanupRow {
-                    package: pkg.clone(),
-                    version,
-                    bytes,
-                })
+            stale.into_iter().map(move |(version, bytes)| CleanupRow {
+                package: pkg.clone(),
+                version,
+                bytes,
+            })
         })
         .collect();
 
@@ -909,9 +1219,9 @@ pub fn build_cleanup_with(
 /// Returns one row per package that was added, removed, or changed size,
 /// stably sorted largest absolute core change first.
 pub fn diff_snapshots(old: &[SnapshotRow], new: &[SnapshotRow]) -> Vec<DiffRow> {
-    let old_map: HashMap<&str, &SnapshotRow> =
+    let old_map: AHashMap<&str, &SnapshotRow> =
         old.iter().map(|row| (row.package.as_str(), row)).collect();
-    let new_map: HashMap<&str, &SnapshotRow> =
+    let new_map: AHashMap<&str, &SnapshotRow> =
         new.iter().map(|row| (row.package.as_str(), row)).collect();
 
     let all_packages: BTreeSet<&str> = old_map
@@ -967,6 +1277,143 @@ pub fn diff_snapshots(old: &[SnapshotRow], new: &[SnapshotRow]) -> Vec<DiffRow> 
         .collect();
 
     rows.sort_by(|a, b| b.core_delta.abs().total_cmp(&a.core_delta.abs()));
+    rows
+}
+
+#[cfg(test)]
+fn resolve_physical_sizes(
+    pkg_data_map: &IndexMap<String, PackageData>,
+    prefix: &Path,
+    sizer: &dyn PhysicalSizer,
+) -> HashMap<String, u64> {
+    let entries: Vec<(&String, &PackageData)> = pkg_data_map.iter().collect();
+    entries
+        .into_par_iter()
+        .map(|(name, pkg)| {
+            let bytes = match pkg {
+                PackageData::Cask(cask) => sizer.cask_size(cask, prefix),
+                PackageData::Formula(formula) => sizer.current_keg_size(formula, prefix),
+            };
+            (name.clone(), bytes)
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn attributed_size(dep: &str, size_map: &HashMap<String, u64>, topo: &Topology) -> f64 {
+    if topo.roots.contains(dep) {
+        return 0.0;
+    }
+    let size = size_map.get(dep).copied().unwrap_or(0);
+    let sharers = topo.sharer_count.get(dep).copied().unwrap_or(1).max(1);
+    size as f64 / sharers as f64
+}
+
+#[cfg(test)]
+fn compute_bloat_metrics<S: AsRef<str>>(
+    targets: &[S],
+    size_map: &HashMap<String, u64>,
+    topo: &Topology,
+) -> Vec<BloatRow> {
+    targets
+        .iter()
+        .map(|target| {
+            let target = target.as_ref();
+            let core_bytes = size_map.get(target).copied().unwrap_or(0);
+            let target_deps = topo.trans_deps.get(target);
+            let dep_count = target_deps.map_or(0, HashSet::len);
+
+            let dep_standard: u64 = target_deps.map_or(0, |deps| {
+                deps.iter()
+                    .map(|d| size_map.get(d.as_str()).copied().unwrap_or(0))
+                    .sum()
+            });
+            let dep_weighted: f64 = target_deps.map_or(0.0, |deps| {
+                deps.iter()
+                    .map(|d| attributed_size(d, size_map, topo))
+                    .sum()
+            });
+
+            let standard_bytes = core_bytes + dep_standard;
+            let weighted_bytes = core_bytes as f64 + dep_weighted;
+            let bloat_ratio = if core_bytes > 0 {
+                Some(weighted_bytes / core_bytes as f64)
+            } else {
+                None
+            };
+
+            BloatRow {
+                package: target.to_string(),
+                core_bytes,
+                standard_bytes,
+                weighted_bytes,
+                bloat_ratio,
+                dep_count,
+                is_root: topo.roots.contains(target),
+                is_requested: topo.requested.contains(target),
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+fn compute_explain_metrics(
+    target: &str,
+    size_map: &HashMap<String, u64>,
+    topo: &Topology,
+) -> Vec<ExplainRow> {
+    let Some(target_deps) = topo.trans_deps.get(target) else {
+        return Vec::new();
+    };
+    if target_deps.is_empty() {
+        return Vec::new();
+    }
+
+    let mut subgraph: HashSet<&str> = target_deps.iter().map(String::as_str).collect();
+    subgraph.insert(target);
+
+    let mut rows: Vec<ExplainRow> = target_deps
+        .iter()
+        .map(|dep| {
+            let size_bytes = size_map.get(dep.as_str()).copied().unwrap_or(0);
+            let is_root = topo.roots.contains(dep.as_str());
+            let shared_by = if is_root {
+                0
+            } else {
+                topo.sharer_count.get(dep.as_str()).copied().unwrap_or(1)
+            };
+            let attributed_bytes = attributed_size(dep, size_map, topo);
+
+            let mut required_by: Vec<String> = subgraph
+                .iter()
+                .filter(|&&p| {
+                    topo.graph
+                        .get(p)
+                        .is_some_and(|deps| deps.iter().any(|d| d == dep))
+                })
+                .map(|&p| p.to_string())
+                .collect();
+            required_by.sort();
+            if required_by.is_empty() {
+                required_by.push(target.to_string());
+            }
+
+            ExplainRow {
+                dependency: dep.clone(),
+                size_bytes,
+                shared_by,
+                attributed_bytes,
+                is_root,
+                required_by,
+            }
+        })
+        .collect();
+
+    rows.sort_by(|a, b| {
+        b.attributed_bytes
+            .total_cmp(&a.attributed_bytes)
+            .then_with(|| a.dependency.cmp(&b.dependency))
+    });
     rows
 }
 

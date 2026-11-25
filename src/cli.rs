@@ -436,12 +436,17 @@ fn load_installed_context(
     spinner_to_stderr: bool,
     target_msg: Option<&str>,
 ) -> Result<(PathBuf, BrewMetadata)> {
-    let prefix = homebrew::get_brew_prefix_with(ctx.runner)?;
     let msg = target_msg.unwrap_or("Scanning physical disk footprint...");
-    let metadata = with_spinner(ctx.interactive_spinners, spinner_to_stderr, msg, || {
-        homebrew::get_brew_metadata_with(ctx.runner)
-    })?;
-    Ok((prefix, metadata))
+    with_spinner(ctx.interactive_spinners, spinner_to_stderr, msg, || {
+        std::thread::scope(|s| {
+            let prefix_handle = s.spawn(|| homebrew::get_brew_prefix_with(ctx.runner));
+            let metadata_res = homebrew::get_brew_metadata_with(ctx.runner);
+            let prefix_res = prefix_handle
+                .join()
+                .unwrap_or_else(|_| homebrew::get_brew_prefix_with(ctx.runner));
+            Ok((prefix_res?, metadata_res?))
+        })
+    })
 }
 
 fn load_catalog_context(
@@ -610,8 +615,10 @@ fn write_export_csv(w: &mut dyn Write, rows: &[BloatRow]) -> Result<()> {
 }
 
 fn write_export_json(w: &mut dyn Write, rows: &[BloatRow]) -> Result<()> {
-    let json = serde_json::to_string_pretty(rows).map_err(error::pipeline_err)?;
-    writeln!(w, "{json}").map_err(error::pipeline_err)
+    let mut buf = io::BufWriter::new(w);
+    serde_json::to_writer_pretty(&mut buf, rows).map_err(error::pipeline_err)?;
+    writeln!(buf).map_err(error::pipeline_err)?;
+    buf.flush().map_err(error::pipeline_err)
 }
 
 fn cmd_analyze(
