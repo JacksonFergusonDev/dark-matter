@@ -253,7 +253,8 @@ jobs:
     name: Publish wheels to PyPI
     needs: [checks, build-wheels, build-sdist]
     if: github.event_name == 'push'
-    runs-on: ubuntu-24.04-arm
+    # pypa/gh-action-pypi-publish ships a linux/amd64-only container image.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release
     permissions:
