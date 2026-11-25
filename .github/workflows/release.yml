@@ -321,7 +321,7 @@ jobs:
     if: ${{ !failure() && !cancelled() && (github.event_name != 'push' || needs.github-release.result == 'success') }}
     permissions:
       contents: read
-    uses: JacksonFergusonDev/ci-cd-release-infrastructure/.github/workflows/update-homebrew-binary.yml@2f79e0f1ed0d45b5582d3b11092fe21c1a61d396 # feat/rust-release-and-binary-homebrew
+    uses: JacksonFergusonDev/ci-cd-release-infrastructure/.github/workflows/update-homebrew-binary.yml@d56f04eb8e21831fb8b0c480abf6a919f93fb9dc # main
     with:
       tag: v${{ needs.verify.outputs.version }}
       formula_path: Formula/dark-matter.rb
