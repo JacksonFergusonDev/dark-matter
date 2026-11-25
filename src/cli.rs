@@ -339,7 +339,7 @@ fn detect_shell(shell_env: Option<&str>) -> Result<Shell> {
         Some("bash") => Ok(Shell::Bash),
         Some("fish") => Ok(Shell::Fish),
         Some("elvish") => Ok(Shell::Elvish),
-        Some("pwsh" | "powershell") => Ok(Shell::PowerShell),
+        Some("pwsh" | "pwsh.exe" | "powershell" | "powershell.exe") => Ok(Shell::PowerShell),
         _ => Err(DarkMatterError::Pipeline(
             "Could not detect shell from $SHELL; pass one explicitly (e.g. --install-completion zsh)."
                 .to_string(),
@@ -368,7 +368,19 @@ fn completion_config_path(shell: Shell, home: &Path) -> Result<PathBuf> {
         Shell::Bash => Ok(home.join(".bashrc")),
         Shell::Fish => Ok(home.join(".config/fish/completions/dark-matter.fish")),
         Shell::Elvish => Ok(home.join(".config/elvish/rc.elv")),
-        Shell::PowerShell => Ok(home.join(".config/powershell/Microsoft.PowerShell_profile.ps1")),
+        Shell::PowerShell => {
+            #[cfg(windows)]
+            {
+                Ok(home
+                    .join("Documents")
+                    .join("PowerShell")
+                    .join("Microsoft.PowerShell_profile.ps1"))
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(home.join(".config/powershell/Microsoft.PowerShell_profile.ps1"))
+            }
+        }
         _ => Err(DarkMatterError::Pipeline(format!(
             "Unsupported shell for completion: {shell}"
         ))),
@@ -427,6 +439,9 @@ fn resolve_shell(shell_opt: Option<Shell>) -> Result<Shell> {
         Ok(shell)
     } else {
         let env_shell = std::env::var("SHELL").ok();
+        if env_shell.is_none() && cfg!(windows) {
+            return Ok(Shell::PowerShell);
+        }
         detect_shell(env_shell.as_deref())
     }
 }

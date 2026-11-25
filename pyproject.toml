@@ -13,6 +13,7 @@ classifiers = [
     "Environment :: Console",
     "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
     "Operating System :: POSIX :: Linux",
     "Programming Language :: Rust",
     "Topic :: System :: Systems Administration",

@@ -291,27 +291,34 @@ fn detect_brew_prefix_from(
     }
 
     if let Some(paths) = path_env {
+        #[cfg(windows)]
+        let brew_names: &[&str] = &["brew.exe", "brew.cmd", "brew.bat", "brew"];
+        #[cfg(not(windows))]
+        let brew_names: &[&str] = &["brew"];
+
         for dir in std::env::split_paths(paths) {
-            let brew_path = dir.join("brew");
-            if !is_executable_file(&brew_path) {
-                continue;
-            }
-            if let Some(candidate) = brew_path.parent().and_then(Path::parent)
-                && looks_like_brew_prefix(candidate)
-            {
-                return Some(candidate.to_path_buf());
-            }
-            if let Ok(canonical) = fs::canonicalize(&brew_path)
-                && let Some(candidate) = canonical.parent().and_then(Path::parent)
-            {
-                if candidate.file_name() == Some(OsStr::new("Homebrew"))
-                    && let Some(parent) = candidate.parent()
-                    && (looks_like_brew_prefix(parent) || parent.join("bin/brew").exists())
-                {
-                    return Some(parent.to_path_buf());
+            for brew_name in brew_names {
+                let brew_path = dir.join(brew_name);
+                if !is_executable_file(&brew_path) {
+                    continue;
                 }
-                if looks_like_brew_prefix(candidate) {
+                if let Some(candidate) = brew_path.parent().and_then(Path::parent)
+                    && looks_like_brew_prefix(candidate)
+                {
                     return Some(candidate.to_path_buf());
+                }
+                if let Ok(canonical) = fs::canonicalize(&brew_path)
+                    && let Some(candidate) = canonical.parent().and_then(Path::parent)
+                {
+                    if candidate.file_name() == Some(OsStr::new("Homebrew"))
+                        && let Some(parent) = candidate.parent()
+                        && (looks_like_brew_prefix(parent) || parent.join("bin/brew").exists())
+                    {
+                        return Some(parent.to_path_buf());
+                    }
+                    if looks_like_brew_prefix(candidate) {
+                        return Some(candidate.to_path_buf());
+                    }
                 }
             }
         }
@@ -357,6 +364,12 @@ fn detect_brew_cache_from(
     if os == "macos" {
         return home.map(|h| h.join("Library").join("Caches").join("Homebrew"));
     }
+    if os == "windows" {
+        if let Some(xdg) = xdg_cache.filter(|v| !v.is_empty()) {
+            return Some(PathBuf::from(xdg).join("Homebrew"));
+        }
+        return home.map(|h| h.join("AppData").join("Local").join("Homebrew"));
+    }
     if let Some(xdg) = xdg_cache.filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(xdg).join("Homebrew"));
     }
@@ -365,7 +378,11 @@ fn detect_brew_cache_from(
 
 fn detect_brew_cache_native() -> Option<PathBuf> {
     let env_cache = std::env::var_os("HOMEBREW_CACHE");
-    let xdg_cache = std::env::var_os("XDG_CACHE_HOME");
+    let xdg_cache = if cfg!(windows) {
+        std::env::var_os("LOCALAPPDATA")
+    } else {
+        std::env::var_os("XDG_CACHE_HOME")
+    };
     let home = dirs::home_dir();
     detect_brew_cache_from(
         std::env::consts::OS,
@@ -2424,6 +2441,20 @@ mod tests {
         assert_eq!(size, 5);
     }
 
+    #[test]
+    fn test_get_path_size_files_dirs_and_missing() {
+        let tmp = TempDir::new().expect("tempdir");
+        let app = tmp.path().join("Foo.app");
+        fs::create_dir(&app).expect("mkdir app");
+        fs::write(app.join("bin"), vec![b'x'; 30]).expect("write bin");
+        let font = tmp.path().join("Font.otf");
+        fs::write(&font, vec![b'x'; 7]).expect("write font");
+
+        assert_eq!(get_path_size(&app), 30);
+        assert_eq!(get_path_size(&font), 7);
+        assert_eq!(get_path_size(&tmp.path().join("missing")), 0);
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_get_path_size() {
@@ -3099,8 +3130,8 @@ mod tests {
         assert_eq!(
             cask_artifact_paths(&cask),
             vec![
-                PathBuf::from("/Applications/qBittorrent.app"),
-                PathBuf::from("/Applications/Adobe Suite"),
+                Path::new("/Applications").join("qBittorrent.app"),
+                Path::new("/Applications").join("Adobe Suite"),
                 PathBuf::from("/Opt/Absolute.app"),
             ]
         );
@@ -3511,7 +3542,22 @@ mod tests {
         // macOS default.
         assert_eq!(
             detect_brew_cache_from("macos", None, Some(OsStr::new("/xdg")), Some(home)),
-            Some(home.join("Library/Caches/Homebrew"))
+            Some(home.join("Library").join("Caches").join("Homebrew"))
+        );
+
+        // Windows with LOCALAPPDATA and fallback.
+        assert_eq!(
+            detect_brew_cache_from(
+                "windows",
+                None,
+                Some(OsStr::new("C:\\Users\\tester\\AppData\\Local")),
+                Some(home)
+            ),
+            Some(PathBuf::from("C:\\Users\\tester\\AppData\\Local").join("Homebrew"))
+        );
+        assert_eq!(
+            detect_brew_cache_from("windows", None, None, Some(home)),
+            Some(home.join("AppData").join("Local").join("Homebrew"))
         );
 
         // Linux with XDG_CACHE_HOME.
@@ -3688,8 +3734,8 @@ mod tests {
         assert_eq!(
             cask.artifacts,
             vec![
-                serde_json::json!({ "target": "/CustomApps/Demo.app" }),
-                serde_json::json!({ "target": "/Library/Fonts/Demo.ttf" }),
+                serde_json::json!({ "target": Path::new("/CustomApps").join("Demo.app").to_string_lossy() }),
+                serde_json::json!({ "target": Path::new("/Library/Fonts").join("Demo.ttf").to_string_lossy() }),
             ]
         );
     }
@@ -3758,13 +3804,14 @@ mod tests {
             .iter()
             .filter_map(|v| v.get("target").and_then(Value::as_str))
             .collect();
+        let expected = [
+            Path::new("/Applications").join("New.app"),
+            PathBuf::from("/Custom/Abs.app"),
+            PathBuf::from("/Library/LaunchAgents/x.plist"),
+        ];
         assert_eq!(
-            targets,
-            vec![
-                "/Applications/New.app",
-                "/Custom/Abs.app",
-                "/Library/LaunchAgents/x.plist",
-            ]
+            targets.iter().map(Path::new).collect::<Vec<_>>(),
+            expected.iter().map(PathBuf::as_path).collect::<Vec<_>>()
         );
     }
 }

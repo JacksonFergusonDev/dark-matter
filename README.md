@@ -69,7 +69,7 @@ Run with `--verbose` to see this check for your own installation.
   - `diff` — compares two `export` snapshots to show what grew, shrank, appeared, or disappeared, e.g. after a `brew upgrade`.
 - **Fractional Attribution Model** — shared dependencies (`openssl`, `zlib`, etc.) are divided evenly across the root packages that need them instead of being double-counted, and the shares add up to exactly the bytes measured. See [the attribution model](#the-attribution-model).
 - **Single native binary & daemon-free** — compiled Rust executable with zero runtime dependencies, no background indexing, and no persistent database. Every run is a fresh, on-demand computation.
-- **Tested and linted** — checked with `clippy` (pedantic), `rustfmt`, unit tests, property-based mass-conservation tests (`proptest`), and CLI integration tests across macOS and Ubuntu, plus a live Homebrew smoke test and coverage floor in CI.
+- **Tested and linted** — checked with `clippy` (pedantic), `rustfmt`, unit tests, property-based mass-conservation tests (`proptest`), and CLI integration tests across macOS, Linux, and Windows (x86_64 and ARM64), plus a live Homebrew smoke test, nightly Homebrew receipt parity checks, and a coverage floor in CI.
 
 ## A note on theoretical measurements
 
