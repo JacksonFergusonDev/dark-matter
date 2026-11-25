@@ -14,3 +14,10 @@ Thumbs.db
 __pycache__/
 coverage.xml
 htmlcov/
+/dist/
+/target/
+*.profraw
+*.whl
+coverage.lcov
+lcov.info
+.rumdl_cache/
