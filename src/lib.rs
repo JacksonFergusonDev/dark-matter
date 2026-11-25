@@ -1,4 +1,5 @@
 pub mod core;
+pub mod display;
 pub mod error;
 pub mod homebrew;
 pub mod model;
