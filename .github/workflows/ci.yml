@@ -11,99 +11,183 @@ on:
 permissions:
   contents: read
 
+# Replace stale PR runs, and keep a separate run for each push to main.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  lint:
-    name: Lint & Format
-    runs-on: ubuntu-latest
+  # All OS- and architecture-agnostic checks run on a single ARM Ubuntu runner.
+  checks:
+    name: Lint, Format & Security
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: 1.100.0
           components: rustfmt, clippy
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: checks-aarch64-unknown-linux-gnu
+          cache-on-failure: true
+          cache-all-crates: true
 
-      - name: Check formatting
+      - name: Check Rust formatting
         run: cargo fmt --all -- --check
 
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
 
-      - name: Install uv (for rumdl)
-        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+      - name: Lint Markdown
+        uses: rvben/rumdl@1e0f1d13c87418c31e0d59dacddd98f27a02efcc # v0.3.2
+        with:
+          version: "0.3.2"
+          report-type: annotations
 
-      - name: Lint Markdown with rumdl
-        run: uvx rumdl check --output-format github .
+      - name: Validate workflows
+        uses: raven-actions/actionlint@3d39aea434753780c3b3d4a1a31c854b4dbf49d7 # v2.2.0
+        with:
+          version: "1.7.12"
+          pyflakes: false
 
-      - name: Check Markdown formatting with rumdl
-        run: uvx rumdl fmt --check --output-format github .
+      - name: Audit workflow security
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: "1.32.0"
+          inputs: .github/
+          token: ${{ github.token }}
+          advanced-security: false
+          annotations: true
 
-  test:
-    name: Test on ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest]
-
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
-
-      - name: Run unit and integration tests
-        run: cargo test --all-targets
-
+  # Architecture-agnostic coverage check on ARM Ubuntu.
   coverage:
     name: Coverage
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
         with:
+          toolchain: 1.100.0
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@fe3acb53a98b62c772db35de75ce0e4595e7ca8c # v2
+        with:
+          tool: cargo-llvm-cov
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: coverage-aarch64-unknown-linux-gnu
+          cache-on-failure: true
+          cache-all-crates: true
 
       - name: Run tests with coverage floor
-        run: cargo llvm-cov --all-targets --fail-under-lines 85
+        run: cargo llvm-cov --locked --all-targets --fail-under-lines 85
+
+  # OS- and architecture-specific test matrix only (macOS, Linux, Windows x arm64 & x64).
+  test:
+    name: Test / ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 25
+    defaults:
+      run:
+        shell: bash
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: macOS arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - platform: macOS x64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - platform: Linux x64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - platform: Linux arm64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - platform: Windows x64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - platform: Windows arm64
+            os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install native Rust toolchain
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0-${{ matrix.target }}
+
+      - name: Confirm native Rust architecture
+        env:
+          EXPECTED_TARGET: ${{ matrix.target }}
+        run: |
+          rustc -vV
+          test "$(rustc -vV | awk '/^host: / {print $2}' | tr -d '\r')" = "$EXPECTED_TARGET"
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: test-${{ matrix.target }}
+          cache-on-failure: true
+          cache-all-crates: true
+
+      - name: Run unit and integration tests
+        run: cargo test --locked --all-targets --no-fail-fast
 
   smoke:
     name: Smoke test against Homebrew
-    runs-on: macos-latest
+    runs-on: macos-15
+    timeout-minutes: 20
     env:
       HOMEBREW_NO_INSTALL_CLEANUP: "1"
       HOMEBREW_NO_ENV_HINTS: "1"
 
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: 1.100.0-aarch64-apple-darwin
 
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          key: smoke-aarch64-apple-darwin
+          cache-on-failure: true
+          cache-all-crates: true
 
       - name: Build release binary
-        run: cargo build --release
+        run: cargo build --locked --release
 
       # A small formula with one dependency, so attribution has a graph to walk.
       - name: Install a test formula
@@ -124,7 +208,7 @@ jobs:
           SMOKE_EXPORT_JSON: export.json
           SMOKE_PACKAGE: watch
           SMOKE_DEPENDENCY: ncurses
-        run: cargo test --test smoke -- --ignored
+        run: cargo test --locked --test smoke -- --ignored
 
       - name: Run catalog-mode commands
         run: |
