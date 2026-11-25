@@ -1,25 +1,21 @@
+[build-system]
+requires = ["maturin>=1.8,<2.0"]
+build-backend = "maturin"
+
 [project]
 name = "dark-matter-cli"
-version = "0.1.4"
+dynamic = ["version"]
 description = "A dependency-graph-aware storage profiler for Homebrew."
 readme = "README.md"
 authors = [{ name = "Jackson Ferguson", email = "jackson.ferguson0@gmail.com" }]
-requires-python = ">=3.12"
-dependencies = [
-    "pandas>=3.0.3",
-    "requests>=2.34.0",
-    "rich>=15.0.0",
-    "typer>=0.25.1",
-]
 license = { file = "LICENSE" }
 classifiers = [
-    "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.12",
-    "Programming Language :: Python :: 3.13",
-    "Programming Language :: Python :: 3.14",
+    "Environment :: Console",
+    "License :: OSI Approved :: MIT License",
     "Operating System :: MacOS",
     "Operating System :: POSIX :: Linux",
-    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Rust",
+    "Topic :: System :: Systems Administration",
 ]
 
 [project.urls]
@@ -28,188 +24,6 @@ Issues = "https://github.com/jacksonfergusondev/dark-matter/issues"
 PyPI = "https://pypi.org/project/dark-matter-cli/"
 Author = "https://jacksonferguson.me"
 
-[project.scripts]
-dark-matter = "dark_matter_cli.cli:app"
-
-[build-system]
-requires = ["hatchling"]
-build-backend = "hatchling.build"
-
-[dependency-groups]
-dev = [
-    "hypothesis>=6.169.0",
-    "mypy>=1.19.1",
-    "pandas-stubs>=3.0.3.260530",
-    "prek>=0.5.3",
-    "pytest>=9.0.2",
-    "pytest-cov>=7.0.0",
-    "pytest-github-actions-annotate-failures>=0.4.2",
-    "pytest-mock>=3.15.1",
-    "ruff>=0.14.13",
-    "rumdl>=0.2.73",
-]
-
-# ==================================================
-# Tool Configuration
-# ==================================================
-
-# ---- ruff ---- #
-
-[tool.ruff]
-target-version = "py312"
-
-[tool.ruff.lint]
-select = [
-    "A",   # flake8-builtins
-    "B",   # flake8-bugbear
-    "C4",  # flake8-comprehensions
-    "D",   # pydocstyle
-    "E",   # pycodestyle errors
-    "F",   # Pyflakes
-    "I",   # isort
-    "N",   # pep8-naming
-    "PD",  # pandas-vet
-    "PT",  # flake8-pytest
-    "RET", # flake8-return
-    "RUF", # Ruff-specific
-    "SIM", # flake8-simplify
-    "T20", # flake8-print
-    "UP",  # pyupgrade
-    "S",   # flake8-bandit (security)
-]
-ignore = ["D100", "D104", "D107", "E501", "S603", "S607"]
-
-[tool.ruff.lint.pydocstyle]
-convention = "google"
-
-[tool.ruff.lint.isort]
-known-first-party = ["dark_matter_cli"]
-section-order = [
-    "future",
-    "standard-library",
-    "third-party",
-    "first-party",
-    "local-folder",
-]
-
-[tool.ruff.lint.per-file-ignores]
-"tests/*.py" = ["T201", "D", "S"]
-
-[tool.ruff.lint.flake8-bugbear]
-extend-immutable-calls = ["typer.Argument", "typer.Option"]
-
-# ---- mypy ---- #
-
-[tool.mypy]
-mypy_path = "src"
-python_version = "3.12"
-strict = true
-pretty = true
-show_error_codes = true
-show_error_context = true
-explicit_package_bases = true
-
-[[tool.mypy.overrides]]
-module = ["tests.*"]
-disallow_untyped_defs = false
-disallow_incomplete_defs = false
-disallow_untyped_calls = false
-warn_return_any = false
-
-# ---- pytest ---- #
-
-[tool.pytest.ini_options]
-addopts = "--strict-markers"
-testpaths = ["tests"]
-pythonpath = ["."]
-
-[tool.coverage.run]
-source = ["src/dark_matter_cli"]
-branch = true
-
-[tool.coverage.report]
-omit = ["src/dark_matter_cli/**/__init__.py"]
-show_missing = true
-skip_covered = true
-fail_under = 85
-
-# ---- rumdl  ---- #
-
-[tool.rumdl]
-disable = [
-    "MD013", # line length - creates unnecessary diff churn
-    "MD033", # inline HTML – required for readme and parts of documentation
-    "MD077", # continuation line indentation – we intentionally use 4 spaces for visual clarity
-]
-
-# --- Heading style ---
-# Enforce ATX style (# Heading) exclusively; setext (underlined) headings are not allowed
-[tool.rumdl.MD003]
-style = "atx"
-
-# --- Unordered list style ---
-# Use dash (-) for list markers – cleaner than * or +, and reduces git diff noise
-[tool.rumdl.MD004]
-style = "dash"
-
-# --- Trailing spaces ---
-# Allow exactly 2 spaces for hard line breaks (Markdown standard); flag any other stray whitespace
-[tool.rumdl.MD009]
-br-spaces = 2
-strict = false
-
-# --- Duplicate headings ---
-# Allow identical subheadings (e.g., "Parameters") as long as they appear under different parent headings
-[tool.rumdl.MD024]
-siblings-only = true
-
-# --- Ordered list numbering ---
-# Use "one" style (1., 1., 1.) so reordering list items doesn't create massive diff churn
-[tool.rumdl.MD029]
-style = "one"
-
-# ---- git-cliff ---- #
-# Release notes and changelog previews, generated from conventional commits.
-
-[tool.git-cliff.changelog]
-body = """
-{% if version %}\
-    ## {{ version }} ({{ timestamp | date(format="%Y-%m-%d") }})
-{% else %}\
-    ## Unreleased
-{% endif %}\
-{% for group, commits in commits | group_by(attribute="group") %}
-    ### {{ group | striptags | trim | upper_first }}
-    {% for commit in commits %}
-        - {% if commit.scope %}**{{ commit.scope }}:** {% endif %}\
-          {{ commit.message | upper_first }}\
-    {% endfor %}
-{% endfor %}\
-{% if previous.version and version %}
-    **Full changelog:** [{{ previous.version }}...{{ version }}](https://github.com/JacksonFergusonDev/dark-matter/compare/{{ previous.version }}...{{ version }})
-{% endif %}
-"""
-trim = true
-
-[tool.git-cliff.git]
-conventional_commits = true
-filter_unconventional = true
-tag_pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+"
-sort_commits = "oldest"
-# Link the "(#N)" that squash merges append to each commit.
-commit_preprocessors = [
-    { pattern = '\(#(\d+)\)', replace = "([#${1}](https://github.com/JacksonFergusonDev/dark-matter/pull/${1}))" },
-]
-# The HTML comments only order the groups; they're stripped from the output.
-commit_parsers = [
-    { message = "^chore: bump version", skip = true },
-    { message = "^chore\\(deps", skip = true },
-    { message = "^feat", group = "<!-- 0 -->Features" },
-    { message = "^fix", group = "<!-- 1 -->Bug fixes" },
-    { message = "^perf", group = "<!-- 2 -->Performance" },
-    { message = "^refactor", group = "<!-- 3 -->Refactoring" },
-    { message = "^docs", group = "<!-- 4 -->Documentation" },
-    { message = "^test", group = "<!-- 5 -->Testing" },
-    { message = "^(ci|build)", group = "<!-- 6 -->CI and packaging" },
-    { message = "^(chore|style)", group = "<!-- 7 -->Maintenance" },
-]
+[tool.maturin]
+bindings = "bin"
+strip = true

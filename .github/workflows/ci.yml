@@ -11,61 +11,80 @@ on:
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   lint:
-    name: Lint & Type Check
+    name: Lint & Format
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      with:
-        enable-cache: true
-        python-version: "3.12"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
 
-    - name: Install dependencies
-      run: uv sync --locked
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
-    - name: Run Ruff Linter
-      run: uv run ruff check --output-format=github .
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-    - name: Run Ruff Formatter
-      run: uv run ruff format --check --output-format=github .
+      - name: Run Clippy
+        run: cargo clippy --all-targets -- -D warnings
 
-    - name: Lint Markdown with rumdl
-      run: uv run rumdl check --output-format github .
+      - name: Install uv (for rumdl)
+        uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
 
-    - name: Check Markdown formatting with rumdl
-      run: uv run rumdl fmt --check --output-format github .
+      - name: Lint Markdown with rumdl
+        run: uvx rumdl check --output-format github .
 
-    - name: Type check with Mypy
-      run: uv run mypy .
+      - name: Check Markdown formatting with rumdl
+        run: uvx rumdl fmt --check --output-format github .
 
   test:
-    name: Test on ${{ matrix.os }} / Python ${{ matrix.python-version }}
+    name: Test on ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.12", "3.13", "3.14"]
 
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      with:
-        enable-cache: true
-        python-version: ${{ matrix.python-version }}
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Install dependencies
-      run: uv sync --locked
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
-    - name: Run tests with coverage
-      run: uv run pytest --cov
+      - name: Run unit and integration tests
+        run: cargo test --all-targets
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run tests with coverage floor
+        run: cargo llvm-cov --all-targets --fail-under-lines 85
 
   smoke:
     name: Smoke test against Homebrew
@@ -75,35 +94,39 @@ jobs:
       HOMEBREW_NO_ENV_HINTS: "1"
 
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-    - name: Install uv
-      uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
-      with:
-        enable-cache: true
-        python-version: "3.14"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
 
-    - name: Install dependencies
-      run: uv sync --locked
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
 
-    # A small formula with one dependency, so attribution has a graph to walk.
-    - name: Install a test formula
-      run: brew install watch
+      - name: Build release binary
+        run: cargo build --release
 
-    - name: Run installed-mode commands
-      run: |
-        uv run dark-matter --verbose analyze --top 5
-        uv run dark-matter inspect watch
-        uv run dark-matter explain watch --tree
-        uv run dark-matter reclaim watch
-        uv run dark-matter orphans
-        uv run dark-matter cleanup
-        uv run dark-matter export --format json > export.json
+      # A small formula with one dependency, so attribution has a graph to walk.
+      - name: Install a test formula
+        run: brew install watch
 
-    - name: Check the export
-      run: uv run python scripts/smoke_check.py export.json watch ncurses
+      - name: Run installed-mode commands
+        run: |
+          ./target/release/dark-matter --verbose analyze --top 5
+          ./target/release/dark-matter inspect watch
+          ./target/release/dark-matter explain watch --tree
+          ./target/release/dark-matter reclaim watch
+          ./target/release/dark-matter orphans
+          ./target/release/dark-matter cleanup
+          ./target/release/dark-matter export --format json > export.json
 
-    - name: Run catalog-mode commands
-      run: |
-        uv run dark-matter inspect watch --source catalog
-        uv run dark-matter explain watch --source catalog
+      - name: Check the export
+        env:
+          SMOKE_EXPORT_JSON: export.json
+          SMOKE_PACKAGE: watch
+          SMOKE_DEPENDENCY: ncurses
+        run: cargo test --test smoke -- --ignored
+
+      - name: Run catalog-mode commands
+        run: |
+          ./target/release/dark-matter inspect watch --source catalog
+          ./target/release/dark-matter explain watch --source catalog
