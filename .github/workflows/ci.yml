@@ -51,7 +51,7 @@ jobs:
         run: cargo clippy --locked --all-targets -- -D warnings
 
       - name: Lint Markdown
-        uses: rvben/rumdl@1e0f1d13c87418c31e0d59dacddd98f27a02efcc # v0.3.2
+        uses: rvben/rumdl@0d3d6e4f07c585a9433df162949ca0fe280a40dd # v0.3.4
         with:
           version: "0.3.2"
           report-type: annotations
